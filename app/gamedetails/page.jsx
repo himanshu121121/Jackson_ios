@@ -15,15 +15,24 @@ import { HomeIndicator } from "@/components/HomeIndicator";
 import { SessionStatus } from "./components/SessionStatus";
 import { LoadingOverlay } from "@/components/AndroidOptimizedLoader";
 
-// Optimized Image Component for Android - using besitosRawData
+// Optimized Image Component for Android - using normalizer for both besitos and bitlab
 const OptimizedGameImage = ({ game, isLoaded, onLoad, onError, className }) => {
-    // Use besitosRawData images first (highest priority)
-    // Always prioritize large_image first
-    const rawData = game?.besitosRawData || {};
-    const imageUrl = rawData.large_image || rawData.image || rawData.square_image ||
+    // Use normalizer to get images for both besitos and bitlab
+    const { normalizeGameImages, normalizeGameTitle, getSdkProvider } = require('@/lib/gameDataNormalizer');
+    const images = normalizeGameImages(game);
+    const provider = getSdkProvider(game);
+    const imageUrl = images.large_image || images.banner || images.square_image || images.icon ||
         game?.images?.large_image || game?.large_image || game?.image || game?.square_image || game?.images?.banner;
 
-    const displayTitle = rawData.title || game?.title || game?.name || game?.details?.name;
+    const displayTitle = normalizeGameTitle(game);
+
+    console.log('🖼️ OptimizedGameImage - Image URLs:', {
+        provider,
+        normalizedImages: images,
+        finalImageUrl: imageUrl,
+        rawCreatives: game?.besitosRawData?.creatives,
+        rawIconUrl: game?.besitosRawData?.icon_url
+    });
 
     if (!imageUrl) return null;
 
@@ -45,10 +54,12 @@ const OptimizedGameImage = ({ game, isLoaded, onLoad, onError, className }) => {
     );
 };
 
+import { useAuth } from "@/contexts/AuthContext";
+
 // Utility imports
 import { handleGameDownload, getUserId } from "@/lib/gameDownloadUtils";
 import sessionManager from "@/lib/sessionManager";
-import { transferGameEarnings } from "@/lib/api";
+import { transferGameEarnings, getBatchStatus } from "@/lib/api";
 import { fetchGameById, fetchUserData } from "@/lib/redux/slice/gameSlice";
 import { fetchWalletTransactions, fetchFullWalletTransactions } from "@/lib/redux/slice/walletTransactionsSlice";
 
@@ -57,6 +68,10 @@ import { fetchWalletTransactions, fetchFullWalletTransactions } from "@/lib/redu
  * Displays comprehensive game information, progress tracking, and reward management
  */
 function GameDetailsContent() {
+    // Authentication
+    const { token } = useAuth();
+    const userId = getUserId();
+
     // Navigation and routing
     const router = useRouter();
     const dispatch = useDispatch();
@@ -101,6 +116,25 @@ function GameDetailsContent() {
     const [isDataLoaded, setIsDataLoaded] = useState(false);
     const [isImageLoaded, setIsImageLoaded] = useState(false);
     const [imageError, setImageError] = useState(false);
+    const [claimedBatches, setClaimedBatches] = useState([]);
+
+    // Scroll to top when navigating to game details page
+    useEffect(() => {
+        // Scroll to top on mount and when gameId changes
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+        // Also try scrolling the document element for better compatibility
+        if (document.documentElement) {
+            document.documentElement.scrollTop = 0;
+        }
+        if (document.body) {
+            document.body.scrollTop = 0;
+        }
+    }, [gameId]);
+
+    // Determine if user navigated from "Games" screen (My Games/downloaded list)
+    // Games screen does NOT send a "source" query param, while other flows (swipe, mostPlayed, etc.) do.
+    const source = searchParams.get('source');
+    const isFromGamesScreen = !source && loadedFromLocalStorage;
 
 
     // Load game data - handle both downloaded games (localStorage) and API games
@@ -234,32 +268,62 @@ function GameDetailsContent() {
     const displayGame = useMemo(() => {
         if (!rawGame) return null;
 
-        // Use besitosRawData if available - it has the most complete data
-        const rawData = rawGame.besitosRawData || {};
+        // Use normalizer to get correct values for both besitos and bitlab
+        const { normalizeGameImages, normalizeGameTitle, normalizeGameDescription, normalizeGameGoals, normalizeGameUrl, normalizeGameAmount, getSdkProvider, getTotalPromisedPoints } = require('@/lib/gameDataNormalizer');
+
+        // Use besitosRawData if available; else use rawGame (e.g. BitLabs offer from localStorage)
+        const rawData = rawGame.besitosRawData || rawGame;
+        const provider = getSdkProvider(rawGame);
+
+        // Get normalized values using the normalizer (handles both besitos and bitlab)
+        const normalizedImages = normalizeGameImages(rawGame);
+        const normalizedTitle = normalizeGameTitle(rawGame);
+        const normalizedDescription = normalizeGameDescription(rawGame);
+        const normalizedGoals = normalizeGameGoals(rawGame);
+        const normalizedUrl = normalizeGameUrl(rawGame);
+        const normalizedAmount = normalizeGameAmount(rawGame);
+
+        // Get category - handle bitlab categories differently
+        const normalizedCategory = (() => {
+            if (provider === 'bitlab') {
+                // Bitlab: categories is an array of strings or objects with id and name
+                const categories = rawData.categories || [];
+                if (categories.length > 0) {
+                    const first = categories[0];
+                    return typeof first === 'string' ? first : (first?.name || first);
+                }
+            }
+            // Besitos: categories array of objects with name property
+            return rawData.categories?.[0]?.name || rawGame.gameDetails?.category || rawGame.category || rawGame.metadata?.genre || 'Game';
+        })();
+
+        // Total coins/XP for BitLab = sum of all promised_points; for Besitos use existing logic
+        const totalPromised = getTotalPromisedPoints(rawGame);
 
         // If game has nested gameDetails, merge it with root properties
-        // Priority: besitosRawData > gameDetails > root properties
-        if (rawGame.gameDetails || rawData.id) {
+        // Priority: normalized values > besitosRawData > gameDetails > root properties
+        if (rawGame.gameDetails || rawData.id || rawData.title) {
             const normalized = {
                 ...rawGame,
                 ...rawGame.gameDetails,
-                // Use besitosRawData properties first (highest priority)
+                // Use normalized values first (highest priority - handles both besitos and bitlab)
                 // Keep root-level properties that might be important
                 _id: rawGame._id,
                 gameId: rawGame.gameId || rawData.id || rawGame.gameDetails?.id,
-                title: rawData.title || rawGame.title || rawGame.gameDetails?.name || rawGame.gameDetails?.title,
-                // Merge goals and points - use besitosRawData first
-                goals: rawData.goals || rawGame.gameDetails?.goals || rawGame.goals,
+                title: normalizedTitle,
+                // Use normalized goals (handles bitlab events -> goals conversion)
+                goals: normalizedGoals,
                 points: rawData.points || rawGame.gameDetails?.points || rawGame.points,
-                // Merge images - use besitosRawData first
-                image: rawData.image || rawGame.gameDetails?.image || rawGame.image,
-                square_image: rawData.square_image || rawGame.gameDetails?.square_image || rawGame.square_image,
-                large_image: rawData.large_image || rawGame.gameDetails?.large_image || rawGame.large_image,
-                // Merge amount and cpi - use besitosRawData first
-                amount: rawData.amount || rawGame.gameDetails?.amount || rawGame.amount,
+                // Use normalized images (handles bitlab creatives/images structure)
+                image: normalizedImages.icon || normalizedImages.square_image || rawGame.gameDetails?.image || rawGame.image,
+                square_image: normalizedImages.square_image || rawGame.gameDetails?.square_image || rawGame.square_image,
+                large_image: normalizedImages.large_image || rawGame.gameDetails?.large_image || rawGame.large_image,
+                banner: normalizedImages.banner,
+                // Use normalized amount (handles bitlab payout summation)
+                amount: normalizedAmount || rawGame.gameDetails?.amount || rawGame.amount,
                 cpi: rawData.cpi || rawGame.gameDetails?.cpi || rawGame.cpi,
-                // Merge category - use besitosRawData first
-                category: rawData.categories?.[0]?.name || rawGame.gameDetails?.category || rawGame.category || rawGame.metadata?.genre,
+                // Use normalized category
+                category: normalizedCategory,
                 // Keep rewards from root level (they're already there)
                 rewards: rawGame.rewards || rawGame.gameDetails?.rewards,
                 // Keep xpRewardConfig for XP calculation
@@ -268,35 +332,40 @@ function GameDetailsContent() {
                 besitosRawData: rawGame.besitosRawData || rawData,
                 // Keep gameDetails for backward compatibility
                 gameDetails: rawGame.gameDetails,
-                // Keep description from besitosRawData
-                description: rawData.description || rawGame.description || rawGame.gameDetails?.description,
-                // Keep URL from besitosRawData
-                url: rawData.url || rawGame.url || rawGame.gameDetails?.downloadUrl,
+                // Use normalized description
+                description: normalizedDescription,
+                // Use normalized URL (handles bitlab clickUrl/click_url/deepLink)
+                url: normalizedUrl || rawGame.gameDetails?.downloadUrl,
                 // Keep bundle_id from besitosRawData
                 bundle_id: rawData.bundle_id || rawGame.bundle_id,
                 // Keep taskProgression and userXpTier
                 taskProgression: rawGame.taskProgression || null,
-                userXpTier: rawGame.userXpTier || null
+                userXpTier: rawGame.userXpTier || null,
+                // Store sdkProvider for easy access
+                sdkProvider: provider,
+                totalPromisedCoins: totalPromised.totalCoins,
+                totalPromisedXP: totalPromised.totalXP
             };
 
             return normalized;
         }
 
-        // If no gameDetails, still use besitosRawData if available
-        if (rawData.id) {
+        // If no gameDetails, still use normalized values
+        if (rawData.id || rawData.title) {
             return {
                 ...rawGame,
-                // Override with besitosRawData values
-                title: rawData.title || rawGame.title,
-                image: rawData.image || rawGame.image,
-                square_image: rawData.square_image || rawGame.square_image,
-                large_image: rawData.large_image || rawGame.large_image,
-                amount: rawData.amount || rawGame.amount,
-                description: rawData.description || rawGame.description,
-                goals: rawData.goals || rawGame.goals,
+                // Use normalized values
+                title: normalizedTitle,
+                image: normalizedImages.icon || normalizedImages.square_image || rawGame.image,
+                square_image: normalizedImages.square_image || rawGame.square_image,
+                large_image: normalizedImages.large_image || rawGame.large_image,
+                banner: normalizedImages.banner,
+                amount: normalizedAmount || rawGame.amount,
+                description: normalizedDescription,
+                goals: normalizedGoals,
                 points: rawData.points || rawGame.points,
-                category: rawData.categories?.[0]?.name || rawGame.category,
-                url: rawData.url || rawGame.url,
+                category: normalizedCategory,
+                url: normalizedUrl || rawGame.url,
                 bundle_id: rawData.bundle_id || rawGame.bundle_id,
                 // Keep rewards and xpRewardConfig
                 rewards: rawGame.rewards,
@@ -304,11 +373,14 @@ function GameDetailsContent() {
                 // Keep taskProgression and userXpTier
                 taskProgression: rawGame.taskProgression || null,
                 userXpTier: rawGame.userXpTier || null,
-                besitosRawData: rawGame.besitosRawData || rawData
+                besitosRawData: rawGame.besitosRawData || rawData,
+                sdkProvider: provider,
+                totalPromisedCoins: totalPromised.totalCoins,
+                totalPromisedXP: totalPromised.totalXP
             };
         }
 
-        return rawGame;
+        return { ...rawGame, totalPromisedCoins: totalPromised.totalCoins, totalPromisedXP: totalPromised.totalXP };
     }, [rawGame]);
 
     // Update selectedTier based on userXpTier from displayGame or userData
@@ -321,12 +393,13 @@ function GameDetailsContent() {
         }
     }, [displayGame?.userXpTier, userData?.userXpTier]);
 
-    // Preload game image to prevent delay - use besitosRawData image first
+    // Preload game image to prevent delay - use normalizer for both besitos and bitlab
     useEffect(() => {
         if (displayGame) {
-            // Priority: Always use large_image first
-            const rawData = displayGame.besitosRawData || {};
-            const imageUrl = rawData.large_image || rawData.image || rawData.square_image ||
+            // Use normalizer to get images for both besitos and bitlab
+            const { normalizeGameImages } = require('@/lib/gameDataNormalizer');
+            const images = normalizeGameImages(displayGame);
+            const imageUrl = images.large_image || images.banner || images.square_image || images.icon ||
                 displayGame.images?.large_image || displayGame.large_image || displayGame.image ||
                 displayGame.square_image || displayGame.images?.banner;
             if (imageUrl) {
@@ -398,32 +471,25 @@ function GameDetailsContent() {
     };
 
 
-    // Refresh user data when page regains focus (after user downloads game)
+    // Refresh user data when page regains focus (after user downloads game).
+    // Stale check: only refetch if last fetch was more than 2 minutes ago to prevent
+    // multiple simultaneous calls that freeze the Android WebView.
     useEffect(() => {
-        const handleFocus = () => {
+        const STALE_MS = 2 * 60 * 1000;
+        const handleVisibilityChange = () => {
+            if (document.hidden) return;
             const userId = getUserId();
             const token = localStorage.getItem('authToken');
-            if (userId && token) {
-                dispatch(fetchUserData({ userId, token }));
-            }
+            if (!userId || !token) return;
+            const lastFetch = localStorage.getItem(`userData_lastFetch_${userId}`);
+            const isStale = !lastFetch || Date.now() - parseInt(lastFetch, 10) > STALE_MS;
+            if (!isStale) return;
+            localStorage.setItem(`userData_lastFetch_${userId}`, String(Date.now()));
+            dispatch(fetchUserData({ userId, token, force: true, background: true }));
         };
 
-        window.addEventListener('focus', handleFocus);
-        return () => window.removeEventListener('focus', handleFocus);
-    }, [dispatch]);
-
-    // Listen for gameDownloaded event to refresh list immediately
-    useEffect(() => {
-        const handleGameDownloaded = (event) => {
-            const userId = getUserId();
-            const token = localStorage.getItem('authToken');
-            if (userId && token) {
-                dispatch(fetchUserData({ userId, token }));
-            }
-        };
-
-        window.addEventListener('gameDownloaded', handleGameDownloaded);
-        return () => window.removeEventListener('gameDownloaded', handleGameDownloaded);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
     }, [dispatch]);
 
     // Check game installation status - Check if game is in downloaded games list
@@ -450,6 +516,25 @@ function GameDetailsContent() {
         setIsGameInstalled(isDownloaded || false);
     }, [displayGame, inProgressGames]);
 
+    // Fetch batch status when game is loaded
+    useEffect(() => {
+        const fetchBatchStatus = async () => {
+            if (!displayGame?.id || !userId) return;
+
+            try {
+                const response = await getBatchStatus(displayGame.id, token); // Pass token for authenticated request
+                if (response.success && response.data) {
+                    setClaimedBatches(response.data.claimedBatches || []);
+                }
+            } catch (error) {
+                console.error('Failed to fetch batch status:', error);
+                // Don't set error state - user can still use the app
+            }
+        };
+
+        fetchBatchStatus();
+    }, [displayGame?.id, userId, token]);
+
     // Event handlers
     const handleBack = () => router.back();
 
@@ -458,9 +543,9 @@ function GameDetailsContent() {
             // Use displayGame (which has besitosRawData merged) or selectedGame
             const gameToDownload = displayGame || selectedGame;
             try {
-                // Use besitosRawData URL if available
-                const rawData = gameToDownload?.besitosRawData || {};
-                const downloadUrl = rawData.url || gameToDownload?.url || gameToDownload?.details?.downloadUrl;
+                // Use normalizer to get correct URL for both besitos and bitlab
+                const { normalizeGameUrl } = require('@/lib/gameDataNormalizer');
+                const downloadUrl = normalizeGameUrl(gameToDownload) || gameToDownload?.url || gameToDownload?.details?.downloadUrl;
                 const gameWithUrl = downloadUrl ? { ...gameToDownload, url: downloadUrl } : gameToDownload;
 
                 await handleGameDownload(gameWithUrl);
@@ -566,24 +651,27 @@ function GameDetailsContent() {
                 throw new Error('User not authenticated');
             }
 
-            // First, call transferGameEarnings API to actually transfer rewards to wallet
+            const gameTitle = displayGame?.besitosRawData?.title || displayGame?.title || 'Unknown Game';
+            const gameId = displayGame?.id || displayGame?._id || displayGame?.gameId;
+
+            // Call transferGameEarnings API with batch fields (backend now handles session state)
             const transferResult = await transferGameEarnings({
-                gameId: displayGame?.id || displayGame?._id || displayGame?.gameId,
+                gameId: gameId,
                 coins: coinsToClaim,
                 xp: xpToClaim,
-                reason: `Game session completion - ${displayGame?.besitosRawData?.title || displayGame?.title || 'Unknown Game'}${claimData.groups ? ` - ${claimData.groups} groups claimed` : ''}`
+                reason: `Game session completion - ${gameTitle}${claimData.groups ? ` - ${claimData.groups} batch${claimData.groups > 1 ? 'es' : ''} claimed` : ''}`,
+                // Batch fields for backend integration
+                batchNumber: claimData.batchNumber,  // Starting batch number (1-indexed)
+                batchesClaimed: claimData.groups || 1,  // Number of batches being claimed
+                gameTitle: gameTitle
             }, token);
 
             if (transferResult.success === false) {
                 throw new Error(transferResult.error || 'Failed to transfer earnings');
             }
 
-            // Then use session manager to update session state
-            const claimResult = await sessionManager.claimSessionRewards(sessionToUse.id, {
-                coins: coinsToClaim,
-                xp: xpToClaim,
-                isClaimed: true
-            });
+            // Note: Backend now handles session state tracking via batch claims
+            // No need for separate claimSessionRewards call
 
             // Update local state - only mark as fully claimed if claiming all rewards
             // Otherwise, keep session active for remaining rewards
@@ -618,6 +706,24 @@ function GameDetailsContent() {
                 // Don't throw error - reward was still claimed successfully
             }
 
+            // Refresh batch status to update claimedBatches and unlock next tasks
+            try {
+                if (displayGame?.id) {
+                    const batchStatusResponse = await getBatchStatus(displayGame.id, token);
+                    if (batchStatusResponse.success && batchStatusResponse.data) {
+                        setClaimedBatches(batchStatusResponse.data.claimedBatches || []);
+                    }
+                }
+            } catch (batchError) {
+                // Don't throw error - reward was still claimed successfully
+                console.error('Failed to refresh batch status:', batchError);
+            }
+
+            // Refresh game data to force re-render of levels
+            if (gameId) {
+                dispatch(fetchGameById({ gameId, force: true }));
+            }
+
             // Show success message
             alert(`✅ Rewards claimed!\n💰 $${coinsToClaim.toFixed(2)} Coins\n⭐ ${xpToClaim} XP${isFullyClaimed ? '\n\nSession ended successfully.' : '\n\nYou can continue earning more rewards!'}`);
         } catch (error) {
@@ -632,7 +738,7 @@ function GameDetailsContent() {
 
     if (isLoading) {
         return (
-            <div className="flex flex-col  overflow-x-hidden w-full h-full items-center justify-center px-4 pb-3 pt-1 bg-black max-w-[390px] mx-auto loading-container android-optimized">
+            <div className="flex flex-col overflow-x-hidden overflow-y-auto w-full min-h-screen items-center justify-start px-4 pb-3 pt-1 bg-black max-w-[390px] mx-auto loading-container android-optimized">
                 {/* App Version */}
                 <div className="w-full max-w-[375px] px-3  mb-3 ml-2 pt-2">
                     <div className="[font-family:'Poppins',Helvetica] font-normal text-[#A4A4A4] text-[10px] tracking-[0] leading-3">
@@ -797,7 +903,7 @@ function GameDetailsContent() {
             className="w-full h-full"
         >
             <div
-                className="flex flex-col overflow-x-hidden w-full h-full items-center justify-center px-4 pb-[120px] pt-1 bg-black max-w-[390px] mx-auto transition-all duration-300 ease-in-out animate-fade-in android-optimized"
+                className="flex flex-col overflow-x-hidden overflow-y-auto w-full min-h-screen items-center justify-start px-4 pb-2 pt-1 bg-black max-w-[390px] mx-auto transition-all duration-300 ease-in-out animate-fade-in android-optimized"
             >
                 {/* App Version */}
                 <div className="w-full max-w-[375px] px-3 ml-2 mb-3 pt-2">
@@ -895,53 +1001,24 @@ function GameDetailsContent() {
                                 <span className="flex items-center gap-0.5 whitespace-nowrap">
                                     <span className="font-semibold text-[14px] whitespace-nowrap">
                                         {(() => {
-                                            // Use rewards.coins first, then fallback to amount
-                                            return displayGame?.rewards?.coins || displayGame?.besitosRawData?.amount || displayGame?.amount || 0;
+                                            const n = displayGame?.totalPromisedCoins ?? displayGame?.rewards?.coins ?? displayGame?.rewards?.gold ?? displayGame?.besitosRawData?.amount ?? displayGame?.amount ?? 0;
+                                            const num = Number(n);
+                                            return Number.isFinite(num) ? (num === Math.round(num) ? String(Math.round(num)) : num.toFixed(2)) : '0';
                                         })()}
                                     </span>
                                     <img
                                         className="w-[20px] h-[19px] object-contain flex-shrink-0"
                                         alt="Coin icon"
-                                        src="https://c.animaapp.com/ltgoa7L3/img/image-3937-7@2x.png"
+                                        src="/dollor.png"
                                     />
                                 </span>
                                 <span className="whitespace-nowrap">and</span>
                                 <span className="flex items-center gap-0.5 whitespace-nowrap">
                                     <span className="font-semibold text-[14px] whitespace-nowrap">
                                         {(() => {
-                                            // Calculate total XP with progressive multiplier
-                                            // Or use rewards.xp if available
-                                            if (displayGame?.rewards?.xp) {
-                                                return displayGame.rewards.xp;
-                                            }
-
-                                            // Calculate from xpRewardConfig with progressive multiplier
-                                            // Task 1: baseXP × multiplier^0
-                                            // Task 2: baseXP × multiplier^1
-                                            // Task 3: baseXP × multiplier^2
-                                            // ...
-                                            // Total = sum of all task XPs
-                                            const xpConfig = displayGame?.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-                                            const baseXP = xpConfig.baseXP || 1;
-                                            const multiplier = xpConfig.multiplier || 1;
-
-                                            // Get total number of tasks/goals
-                                            const goals = displayGame?.besitosRawData?.goals || displayGame?.goals || [];
-                                            const totalTasks = goals.length || 0;
-
-                                            // Calculate total XP: sum of baseXP × multiplier^taskIndex for all tasks
-                                            // This is a geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1) when multiplier ≠ 1
-                                            // When multiplier = 1, it's just baseXP × totalTasks
-                                            let totalXP = 0;
-                                            if (multiplier === 1) {
-                                                // Simple case: all tasks have same XP
-                                                totalXP = baseXP * totalTasks;
-                                            } else {
-                                                // Geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1)
-                                                totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-                                            }
-
-                                            return Math.floor(totalXP) > 0 ? Math.floor(totalXP) : 0;
+                                            const n = displayGame?.totalPromisedXP ?? displayGame?.rewards?.xp ?? 0;
+                                            const num = Number(n);
+                                            return Number.isFinite(num) ? String(Math.round(num)) : '0';
                                         })()}
                                     </span>
                                     <img
@@ -976,6 +1053,8 @@ function GameDetailsContent() {
                         selectedTier={selectedTier}
                         onTierChange={handleTierChange}
                         onSessionUpdate={handleSessionUpdate}
+                        claimedBatches={claimedBatches}
+                        isDownloadedGame={loadedFromLocalStorage}
                     />
                 </div>
 
@@ -1000,7 +1079,7 @@ function GameDetailsContent() {
                     />
                 </div>
 
-                <div className="animate-fade-in">
+                <div className="animate-fade-in mb-2">
                     <DailyChallenge
                         game={displayGame}
                         onChallengeClick={handleDailyChallenge}
@@ -1012,6 +1091,9 @@ function GameDetailsContent() {
                     game={selectedGame}
                     currentSession={currentSession}
                 /> */}
+
+                {/* Add bottom padding for fixed ActionButtonSection */}
+                <div className="h-20"></div>
 
             </div>
 

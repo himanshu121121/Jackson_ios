@@ -52,13 +52,17 @@ export const Coins = ({ game, viewCount, onBack, onChat }) => {
 
                 <div className="inline-flex items-center absolute top-12 left-[17px]">
                     <div className="relative w-fit mt-[-1.00px] [font-family:'Poppins',Helvetica] font-light text-white text-xs tracking-[0] leading-[normal]">
-                        Earn up to {game?.amount || 0}
+                        Earn up to {(() => {
+                            const n = game?.rewards?.coins ?? game?.rewards?.gold ?? game?.amount ?? 0;
+                            const num = Number(n);
+                            return Number.isFinite(num) ? (num === Math.round(num) ? String(Math.round(num)) : num.toFixed(2)) : '0';
+                        })()}
                     </div>
 
                     <img
                         className="relative w-3.5 h-3.5 aspect-[0.97]"
                         alt="Coin icon"
-                        src="https://c.animaapp.com/ltgoa7L3/img/image-3937-7@2x.png"
+                        src="/dollor.png"
                     />
 
                     <div className="relative w-fit mt-[-1.00px] font-normal text-xs flex items-start justify-center [font-family:'Poppins',Helvetica] text-white tracking-[0] leading-[normal]">
@@ -91,7 +95,7 @@ export const Coins = ({ game, viewCount, onBack, onChat }) => {
                             <img
                                 className="absolute top-2 left-[272px] w-[23px] h-6 aspect-[0.97]"
                                 alt="Coin icon"
-                                src="https://c.animaapp.com/ltgoa7L3/img/image-3937-6@2x.png"
+                                src="/dollor.png"
                             />
 
                             <div className="absolute top-[20px] left-[calc(50.00%_-_38px)] w-[89px] h-[22px]">

@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useSelector, useDispatch } from "react-redux";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { CoinInfoModal } from "./CoinInfoModal";
 import { OptInModal } from "./OptInModal";
-import { transferGameEarnings } from "../../../lib/api";
+import { transferGameEarnings, getBatchStatus } from "../../../lib/api";
 import { fetchWalletTransactions, fetchFullWalletTransactions } from "@/lib/redux/slice/walletTransactionsSlice";
 
 
@@ -29,158 +30,211 @@ export const Coin = ({
     const [claimedXP, setClaimedXP] = useState(0);
     const [errorMessage, setErrorMessage] = useState("");
     const [claimedGroups, setClaimedGroups] = useState(0); // Track how many groups have been claimed
+    const claimModalRef = useRef(null); // Ref for claim warning modal
+    const successModalRef = useRef(null); // Ref for success modal
+    const errorModalRef = useRef(null); // Ref for error modal
 
     // Get authentication data from AuthContext
     const { token } = useAuth();
     const router = useRouter();
     const dispatch = useDispatch();
 
-    // Progressive reward system based on backend taskProgression batches
-    const calculateProgressiveRewards = (completedTasks, taskProgressionData, processedGoals) => {
-        // Ensure we have a valid number
-        const validCompletedTasks = Math.max(0, completedTasks || 0);
+    /**
+     * Build batches from processed goals using backend progression rules:
+     * - First batch size = firstBatchSize (or 3 if rule missing)
+     * - Next batches size = nextBatchSize (or same as first / 3 fallback)
+     *
+     * IMPORTANT: Rewards are NOT hardcoded. We sum the actual per-task rewards:
+     * - coins: `goal.coinReward`
+     * - xp: `goal.xpReward`
+     */
+    const batchData = useMemo(() => {
+        const processedGoals = Array.isArray(taskProgression?.processedGoals)
+            ? taskProgression.processedGoals
+            : [];
 
-        // Get batch sizes from taskProgression (from backend)
-        const hasProgressionRule = taskProgressionData?.hasProgressionRule || false;
-        const firstBatchSize = taskProgressionData?.firstBatchSize || 0;
-        const nextBatchSize = taskProgressionData?.nextBatchSize || 0;
+        const hasProgressionRule = !!taskProgression?.hasProgressionRule;
+        const firstBatchSize = Number(taskProgression?.firstBatchSize || 0);
+        const nextBatchSize = Number(taskProgression?.nextBatchSize || 0);
 
-        // If no progression rule, fallback to groups of 3 (legacy behavior)
-        const tasksPerBatch = hasProgressionRule && firstBatchSize > 0 ? firstBatchSize : 3;
-        const nextBatchSizeValue = hasProgressionRule && nextBatchSize > 0 ? nextBatchSize : 3;
+        const fallbackFirst = 3;
+        const effectiveFirstBatchSize = hasProgressionRule && firstBatchSize > 0 ? firstBatchSize : fallbackFirst;
+        const effectiveNextBatchSize = hasProgressionRule && nextBatchSize > 0 ? nextBatchSize : effectiveFirstBatchSize;
 
+        const batches = [];
+        let idx = 0;
+
+        // First batch
+        if (effectiveFirstBatchSize > 0) {
+            const goals = processedGoals.slice(idx, idx + effectiveFirstBatchSize);
+            if (goals.length > 0) {
+                batches.push({ size: effectiveFirstBatchSize, goals });
+            }
+            idx += effectiveFirstBatchSize;
+        }
+
+        // Subsequent batches
+        while (idx < processedGoals.length && effectiveNextBatchSize > 0) {
+            const goals = processedGoals.slice(idx, idx + effectiveNextBatchSize);
+            if (goals.length === 0) break;
+            batches.push({ size: effectiveNextBatchSize, goals });
+            idx += effectiveNextBatchSize;
+        }
+
+        // Compute completion sequentially (only full batches count)
         let completedBatches = 0;
-        let remainingTasks = validCompletedTasks;
+        let currentBatchProgress = 0; // how many completed (unlocked) tasks in the current batch
+        let currentBatchTarget = effectiveFirstBatchSize;
 
-        // Calculate how many full batches are completed
-        if (validCompletedTasks >= tasksPerBatch) {
-            // First batch completed
-            completedBatches = 1;
-            remainingTasks = validCompletedTasks - tasksPerBatch;
+        for (let b = 0; b < batches.length; b++) {
+            const batch = batches[b];
+            const unlockedInBatch = batch.goals.filter(g => !g?.isLocked);
+            const completedUnlockedInBatch = unlockedInBatch.filter(g => g?.isCompleted).length;
+            const isFullBatch = batch.goals.length === batch.size;
+            const batchAllUnlocked = unlockedInBatch.length === batch.size;
+            const batchCompleted = isFullBatch && batchAllUnlocked && completedUnlockedInBatch === batch.size;
 
-            // Check for additional batches
-            if (hasProgressionRule && nextBatchSizeValue > 0) {
-                // Additional batches use nextBatchSize
-                completedBatches += Math.floor(remainingTasks / nextBatchSizeValue);
-                remainingTasks = remainingTasks % nextBatchSizeValue;
+            if (batchCompleted) {
+                completedBatches += 1;
             } else {
-                // Legacy: all batches use same size
-                completedBatches += Math.floor(remainingTasks / tasksPerBatch);
-                remainingTasks = remainingTasks % tasksPerBatch;
+                // If some tasks are still locked, progress is capped by unlocked count
+                currentBatchProgress = completedUnlockedInBatch;
+                currentBatchTarget = batch.size;
+                break;
+            }
+
+            // If all existing batches are completed, the next target is the next batch size
+            const next = batches[b + 1];
+            if (next) {
+                const nextUnlocked = next.goals.filter(g => !g?.isLocked);
+                currentBatchProgress = nextUnlocked.filter(g => g?.isCompleted).length;
+                currentBatchTarget = next.size;
+            } else {
+                // No next batch built yet; keep target consistent with rules
+                currentBatchProgress = 0;
+                currentBatchTarget = b === 0 ? effectiveNextBatchSize : effectiveNextBatchSize;
             }
         }
 
-        // If using backend progression and have processedGoals, check for completed unlocked batches
-        if (hasProgressionRule && processedGoals && Array.isArray(processedGoals)) {
-            const unlockedGoals = processedGoals.filter(g => !g.isLocked);
-            completedBatches = 0;
-            remainingTasks = 0;
+        const sumRewards = (goals) => {
+            return goals.reduce(
+                (acc, g) => {
+                    const c = Number(g?.coinReward || 0);
+                    const x = Number(g?.xpReward || 0);
+                    return { coins: acc.coins + c, xp: acc.xp + x };
+                },
+                { coins: 0, xp: 0 }
+            );
+        };
 
-            if (firstBatchSize > 0) {
-                // Check first batch
-                const firstBatch = unlockedGoals.slice(0, firstBatchSize);
-                const firstBatchCompleted = firstBatch.length > 0 && firstBatch.every(g => g.isCompleted);
+        // Earned totals should be based on completed goals (locked goals shouldn't normally be completed,
+        // but we include all for correctness)
+        const totalEarned = sumRewards(processedGoals.filter(g => g?.isCompleted));
 
-                if (firstBatchCompleted) {
-                    completedBatches = 1;
-                    let currentIndex = firstBatchSize;
+        // Overall totals for progress bar. Prefer API rewards.coins / rewards.xp everywhere (all UI sections + game details)
+        const rawData = game?.besitosRawData || game || {};
+        const rewardsCoins = game?.rewards?.coins ?? game?.rewards?.gold;
+        const rewardsXP = game?.rewards?.xp;
+        const isBitLab = game?.sdkProvider === 'bitlab' || game?.bitlabsRawData != null || rawData.total_points != null || game?.total_points != null || (rawData.events?.length && rawData.events[0]?.promised_points !== undefined) || (game?.bitlabsRawData?.events?.length > 0);
+        const totalPossibleCoins = (rewardsCoins != null && Number(rewardsCoins) >= 0)
+            ? Number(rewardsCoins)
+            : isBitLab && (rawData.total_points != null || game?.total_points != null)
+                ? Number(rawData.total_points ?? game?.total_points ?? 0)
+                : processedGoals.reduce((sum, g) => {
+                    const v = Number(g?.reward ?? g?.coinReward ?? 0);
+                    return sum + (Number.isFinite(v) ? v : 0);
+                }, 0);
 
-                    // Check subsequent batches
-                    while (nextBatchSizeValue > 0 && currentIndex < unlockedGoals.length) {
-                        const nextBatch = unlockedGoals.slice(currentIndex, currentIndex + nextBatchSizeValue);
-                        if (nextBatch.length === nextBatchSizeValue && nextBatch.every(g => g.isCompleted)) {
-                            completedBatches++;
-                            currentIndex += nextBatchSizeValue;
-                        } else {
-                            // Calculate remaining tasks in current batch
-                            remainingTasks = nextBatch.filter(g => g.isCompleted).length;
-                            break;
-                        }
-                    }
+        const xpConfig = game?.xpRewardConfig || rawData?.xpRewardConfig || { baseXP: 1, multiplier: 1 };
+        const baseXP = Number(xpConfig.baseXP || 1);
+        const multiplier = Number(xpConfig.multiplier || 1);
+        const totalPossibleXP = (rewardsXP != null && Number(rewardsXP) >= 0)
+            ? Number(rewardsXP)
+            : processedGoals.reduce((sum, _g, index) => {
+                const xp = Math.round((baseXP * Math.pow(multiplier, index)) * 100) / 100;
+                return sum + (Number.isFinite(xp) ? xp : 0);
+            }, 0);
 
-                    // If no more batches, remainingTasks = 0
-                    if (currentIndex >= unlockedGoals.length) {
-                        remainingTasks = 0;
-                    }
-                } else {
-                    // First batch not completed, calculate progress
-                    remainingTasks = firstBatch.filter(g => g.isCompleted).length;
-                }
-            }
+        // Rewards for each FULL completed batch (sequential)
+        const completedBatchRewards = [];
+        for (let b = 0; b < completedBatches; b++) {
+            completedBatchRewards.push(sumRewards(batches[b]?.goals || []));
         }
-
-        // Base reward per batch (increases with each batch)
-        const baseRewardPerBatch = 10; // $10 for first batch
-        const rewardIncrease = 5; // $5 increase per batch
-
-        let totalCoins = 0;
-        let totalXP = 0;
-
-        // Calculate rewards for completed batches only (no partial rewards)
-        for (let batch = 0; batch < completedBatches; batch++) {
-            const batchReward = baseRewardPerBatch + (batch * rewardIncrease);
-            totalCoins += batchReward;
-            totalXP += 50; // Fixed XP per batch
-        }
-
-        // Calculate next batch target size
-        const nextBatchTarget = completedBatches === 0 ? tasksPerBatch : nextBatchSizeValue;
 
         return {
-            totalCoins: Math.round(totalCoins * 100) / 100, // Round to 2 decimal places
-            totalXP: totalXP,
-            completedGroups: completedBatches, // Use completedBatches as completedGroups for consistency
-            remainingTasks,
-            nextGroupProgress: remainingTasks,
-            nextGroupTarget: nextBatchTarget,
-            canClaim: completedBatches > 0 // Can claim if there are any completed batches
+            batches,
+            completedBatches,
+            completedBatchRewards,
+            totalEarnedCoins: Math.round(totalEarned.coins * 100) / 100,
+            totalEarnedXP: Math.round(totalEarned.xp * 100) / 100,
+            totalPossibleCoins: Math.round(totalPossibleCoins * 100) / 100,
+            totalPossibleXP: Math.round(totalPossibleXP * 100) / 100,
+            currentBatchProgress,
+            currentBatchTarget
         };
-    };
+    }, [taskProgression, game]);
 
-    // Calculate rewards based on completed tasks count (follows backend taskProgression rules)
-    // Use completedTasksCount (completed unlocked tasks) and taskProgression for accurate batch calculation
-    // Use useMemo to recalculate when completedTasksCount or taskProgression changes
-    const rewardData = useMemo(() => {
-        const processedGoals = taskProgression?.processedGoals || null;
-        return calculateProgressiveRewards(completedTasksCount, taskProgression, processedGoals);
-    }, [completedTasksCount, taskProgression]);
+    // How many FULL batches are claimable now (excluding already claimed batches)
+    const claimableBatches = useMemo(() => {
+        return Math.max(0, batchData.completedBatches - claimedGroups);
+    }, [batchData.completedBatches, claimedGroups]);
 
-    // Calculate available rewards (excluding already claimed groups)
-    // Use useMemo to ensure this recalculates when rewardData or claimedGroups changes
-    const availableGroups = useMemo(() => {
-        return Math.max(0, rewardData.completedGroups - claimedGroups);
-    }, [rewardData.completedGroups, claimedGroups]);
+    // Sum rewards for the claimable (completed but unclaimed) batches
+    const claimableRewards = useMemo(() => {
+        if (claimableBatches <= 0) return { coins: 0, xp: 0 };
+        const start = claimedGroups;
+        const end = claimedGroups + claimableBatches;
+        const slice = batchData.completedBatchRewards.slice(start, end);
+        const totals = slice.reduce(
+            (acc, r) => ({ coins: acc.coins + (r?.coins || 0), xp: acc.xp + (r?.xp || 0) }),
+            { coins: 0, xp: 0 }
+        );
+        return {
+            coins: Math.round(totals.coins * 100) / 100,
+            xp: Math.round(totals.xp * 100) / 100
+        };
+    }, [batchData.completedBatchRewards, claimableBatches, claimedGroups]);
 
-    const availableCoins = useMemo(() => {
-        return availableGroups > 0 ?
-            Array.from({ length: availableGroups }, (_, i) => {
-                const groupIndex = claimedGroups + i;
-                return 10 + (groupIndex * 5); // Base reward + increase per group
-            }).reduce((sum, reward) => sum + reward, 0) : 0;
-    }, [availableGroups, claimedGroups]);
+    // Fetch batch status from backend on mount and when gameId changes
+    useEffect(() => {
+        const fetchBatchStatus = async () => {
+            if (!game?.id || !token) return;
 
-    const availableXP = useMemo(() => {
-        return availableGroups * 50;
-    }, [availableGroups]);
+            try {
+                const response = await getBatchStatus(game.id, token);
+                if (response.success && response.data) {
+                    // Set claimedGroups based on backend data
+                    const claimedBatches = response.data.claimedBatches || [];
+                    setClaimedGroups(claimedBatches.length);
+                }
+            } catch (error) {
+                // Silently fail - user can still claim, we just won't know previous claims
+                console.error('Failed to fetch batch status:', error);
+            }
+        };
+
+        fetchBatchStatus();
+    }, [game?.id, token]);
 
     // Reset locallyClaimed when new groups become available (after user completes more tasks)
     // This ensures UI shows new available rewards instead of old claimed values
     useEffect(() => {
         // If new tasks are completed (completedTasksCount increased) and there are available groups,
         // reset the claimed state to show new available rewards
-        const newAvailableGroups = Math.max(0, rewardData.completedGroups - claimedGroups);
+        const newAvailableGroups = Math.max(0, batchData.completedBatches - claimedGroups);
 
         if (newAvailableGroups > 0 && locallyClaimed) {
             // New groups are available, reset claimed state to show new available rewards
             setLocallyClaimed(false);
         }
-    }, [rewardData.completedGroups, claimedGroups, locallyClaimed]);
+    }, [batchData.completedBatches, claimedGroups, locallyClaimed]);
 
-    const taskProgressPercentage = rewardData.nextGroupTarget > 0
-        ? (rewardData.nextGroupProgress / rewardData.nextGroupTarget) * 100
+    // Progress bar should reflect TOTAL earned coins / TOTAL possible coins for this game (all goals)
+    const overallCoinProgressPercentage = batchData.totalPossibleCoins > 0
+        ? (batchData.totalEarnedCoins / batchData.totalPossibleCoins) * 100
         : 0;
 
-    const finalProgressPercentage = locallyClaimed || availableGroups > 0 ? 100 : taskProgressPercentage;
+    const finalProgressPercentage = Math.max(0, Math.min(100, overallCoinProgressPercentage));
 
     /**
      * Get simple user-friendly error message
@@ -198,9 +252,9 @@ export const Coin = ({
      */
     const handleClaimClick = () => {
         // Check if there are available groups to claim
-        if (availableGroups === 0) {
+        if (claimableBatches === 0) {
             // Calculate remaining tasks needed for next group
-            const remainingTasks = rewardData.nextGroupTarget - rewardData.nextGroupProgress;
+            const remainingTasks = Math.max(0, batchData.currentBatchTarget - batchData.currentBatchProgress);
             const errorMsg = remainingTasks > 0
                 ? `🎯 Complete ${remainingTasks} more task${remainingTasks > 1 ? 's' : ''} to unlock your next reward group!`
                 : "🎯 Complete more tasks to unlock your next reward group!";
@@ -216,16 +270,14 @@ export const Coin = ({
         setShowClaimWarning(true);
     };
 
-
     const handleConfirmClaim = async () => {
         // Check if there are available groups to claim
-        if (availableGroups === 0) {
+        if (claimableBatches === 0) {
             setShowClaimWarning(false);
             return;
         }
 
         if (claiming) {
-            setShowClaimWarning(false);
             return;
         }
 
@@ -237,7 +289,6 @@ export const Coin = ({
 
         // Set claiming immediately to prevent duplicate calls
         setClaiming(true);
-        setShowClaimWarning(false);
 
         try {
             // Get user token from AuthContext
@@ -245,21 +296,30 @@ export const Coin = ({
                 throw new Error('User not authenticated');
             }
 
-            // Prepare earning data for API call with available rewards only
+            // Calculate starting batch number (1-indexed: first batch is 1, second is 2, etc.)
+            const startingBatchNumber = claimedGroups + 1;
+            const { normalizeGameTitle } = require('@/lib/gameDataNormalizer');
+            const gameTitle = normalizeGameTitle(game);
+
+            // Prepare earning data for API call with batch fields for backend integration
             const earningData = {
                 gameId: game.id,
-                coins: availableCoins,
-                xp: availableXP,
-                reason: `Game session completion - ${game.besitosRawData?.title || game.title || 'Unknown Game'} - ${availableGroups} groups claimed`
+                coins: claimableRewards.coins,
+                xp: claimableRewards.xp,
+                reason: `Game session completion - ${gameTitle} - ${claimableBatches} batch${claimableBatches > 1 ? 'es' : ''} claimed`,
+                batchNumber: startingBatchNumber,  // Starting batch number (1-indexed)
+                batchesClaimed: claimableBatches,  // How many batches being claimed
+                gameTitle: gameTitle                // Game title for backend tracking
             };
 
             // Prefer parent-provided claim handler which also locks session
             // Pass the claim data so parent can handle progressive group claims
             if (typeof onClaimRewards === 'function') {
                 await onClaimRewards({
-                    coins: availableCoins,
-                    xp: availableXP,
-                    groups: availableGroups
+                    coins: claimableRewards.coins,
+                    xp: claimableRewards.xp,
+                    groups: claimableBatches,
+                    batchNumber: startingBatchNumber  // Pass batch number to parent
                 });
             } else {
                 // Fallback to direct transfer if parent handler not provided
@@ -273,11 +333,25 @@ export const Coin = ({
 
             // Only update state after successful claim
             setLocallyClaimed(true);
-            setClaimedCoins(availableCoins);
-            setClaimedXP(availableXP);
+            setClaimedCoins(claimableRewards.coins);
+            setClaimedXP(claimableRewards.xp);
 
             // Update claimed groups count - this prevents claiming the same groups again
-            setClaimedGroups(prev => prev + availableGroups);
+            setClaimedGroups(prev => prev + claimableBatches);
+
+            // Refresh batch status from backend to ensure sync
+            try {
+                if (game?.id && token) {
+                    const batchStatusResponse = await getBatchStatus(game.id, token);
+                    if (batchStatusResponse.success && batchStatusResponse.data) {
+                        const claimedBatches = batchStatusResponse.data.claimedBatches || [];
+                        setClaimedGroups(claimedBatches.length);
+                    }
+                }
+            } catch (batchError) {
+                // Don't throw error - reward was still claimed successfully
+                console.error('Failed to refresh batch status:', batchError);
+            }
 
             // Refresh transaction history immediately after reward claim
             try {
@@ -306,6 +380,7 @@ export const Coin = ({
             // Only reset if we had set it (meaning this was a new claim attempt that failed)
         } finally {
             setClaiming(false);
+            setShowClaimWarning(false);
         }
     };
 
@@ -319,27 +394,32 @@ export const Coin = ({
             <div className="relative self-stretch w-full h-[227px] rounded-2xl border border-solid border-[#616161]">
                 <button
                     onClick={handleClaimClick}
-                    disabled={availableGroups === 0 || claiming}
+                    disabled={claimableBatches === 0 || claiming}
                     className={`
                         absolute bottom-4 left-4 right-12 h-10 flex items-center justify-center rounded-lg overflow-hidden 
                         transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 focus:ring-offset-black
-                        ${availableGroups === 0 || claiming
+                        ${claimableBatches === 0 || claiming
                             ? 'bg-gray-600 cursor-not-allowed opacity-50'
                             : 'bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] hover:opacity-90 cursor-pointer'
                         }
                     `}
                     aria-label="Claim available rewards"
                     title={
-                        availableGroups === 0
-                            ? `Complete ${rewardData.nextGroupTarget - rewardData.nextGroupProgress} more task${rewardData.nextGroupTarget - rewardData.nextGroupProgress !== 1 ? 's' : ''} to unlock rewards`
+                        claimableBatches === 0
+                            ? `Complete ${Math.max(0, batchData.currentBatchTarget - batchData.currentBatchProgress)} more task${Math.max(0, batchData.currentBatchTarget - batchData.currentBatchProgress) !== 1 ? 's' : ''} to unlock rewards`
                             : claiming ? 'Claiming rewards...' :
-                                `Click to claim ${availableGroups} group${availableGroups > 1 ? 's' : ''} (${availableCoins.toFixed(2)} coins + ${availableXP} XP)`
+                                `Click to claim ${claimableBatches} batch${claimableBatches > 1 ? 'es' : ''} (${claimableRewards.coins.toFixed(2)} coins + ${claimableRewards.xp} XP)`
                     }
                 >
                     <span className="[font-family:'Poppins',Helvetica] font-semibold text-white text-sm text-center tracking-[0] leading-[normal]">
-                        {claiming ? 'Claiming...' :
-                            availableGroups === 0 ? '🔒 Claim Rewards Now' :
-                                `🎉 Claim ${availableGroups} Group${availableGroups > 1 ? 's' : ''}!`}
+                        {claiming ? (
+                            <div className="flex items-center justify-center">
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                                Claiming...
+                            </div>
+                        ) :
+                            claimableBatches === 0 ? '🔒 Claim Rewards Now' :
+                                `🎉 Claim ${claimableBatches} Batch${claimableBatches > 1 ? 'es' : ''}!`}
                     </span>
                 </button>
 
@@ -350,34 +430,24 @@ export const Coin = ({
                 >
                     <span className={`[font-family:'Poppins',Helvetica] font-bold text-[15px] tracking-[0] leading-[17px] whitespace-nowrap transition-all duration-500 ${locallyClaimed ? 'text-green-400' : 'text-white'
                         }`}>
-                        {locallyClaimed ? claimedCoins.toFixed(2) : availableCoins.toFixed(2)}
+                        {locallyClaimed ? claimedCoins.toFixed(2) : claimableRewards.coins.toFixed(2)}
                     </span>
 
                     <img
                         className="w-[18px] h-[18px] object-contain flex-shrink-0"
                         alt="Coin icon"
-                        src="https://c.animaapp.com/WucpRujl/img/image-3937@2x.png"
-                        loading="eager"
-                        decoding="async"
-                        fetchPriority="high"
-                        width={18}
-                        height={18}
+                        src="/dollor.png"
                     />
 
                     <span className={`[font-family:'Poppins',Helvetica] font-bold text-[15px] tracking-[0] leading-[17px] whitespace-nowrap transition-all duration-500 ${locallyClaimed ? 'text-green-400' : 'text-white'
                         }`}>
-                        and {locallyClaimed ? claimedXP : availableXP}
+                        and {locallyClaimed ? claimedXP : claimableRewards.xp}
                     </span>
 
                     <img
                         className="w-[18px] h-[18px] object-contain flex-shrink-0"
                         alt="Level icon"
                         src="https://c.animaapp.com/WucpRujl/img/pic.svg"
-                        loading="eager"
-                        decoding="async"
-                        fetchPriority="high"
-                        width={18}
-                        height={18}
                     />
                 </div>
 
@@ -387,10 +457,10 @@ export const Coin = ({
                     <div
                         className="relative w-full"
                         role="progressbar"
-                        aria-valuenow={rewardData.nextGroupProgress}
+                        aria-valuenow={batchData.totalEarnedCoins}
                         aria-valuemin={0}
-                        aria-valuemax={rewardData.nextGroupTarget}
-                        aria-label={`Task Progress: ${rewardData.nextGroupProgress} of ${rewardData.nextGroupTarget} tasks completed for next reward.`}
+                        aria-valuemax={batchData.totalPossibleCoins}
+                        aria-label={`Overall Progress: ${batchData.totalEarnedCoins.toFixed(2)} of ${batchData.totalPossibleCoins.toFixed(2)} coins earned.`}
                     >
 
                         <div className="w-full h-4 bg-[#373737] rounded-full border border-gray-700">
@@ -428,7 +498,6 @@ export const Coin = ({
                         className="w-6 h-6"
                         loading="eager"
                         decoding="async"
-                        fetchPriority="high"
                         width={24}
                         height={24}
                     />
@@ -443,21 +512,16 @@ export const Coin = ({
                         <div
                             className="flex items-center gap-2"
                             role="status"
-                            aria-label={`Session earnings: ${availableCoins.toFixed(2)}`}
+                            aria-label={`Total earned coins: ${batchData.totalEarnedCoins.toFixed(2)}`}
                         >
                             <span className="[font-family:'Poppins',Helvetica] font-semibold text-white text-lg tracking-[0] leading-5 whitespace-nowrap">
-                                {availableCoins.toFixed(2)}
+                                {batchData.totalEarnedCoins.toFixed(2)}
                             </span>
 
                             <img
                                 className="w-[22px] h-[23px] object-contain"
                                 alt="Coin icon"
-                                src="https://c.animaapp.com/WucpRujl/img/image-3938@2x.png"
-                                loading="eager"
-                                decoding="async"
-                                fetchPriority="high"
-                                width={22}
-                                height={23}
+                                src="/dollor.png"
                             />
                         </div>
                     </div>
@@ -468,10 +532,10 @@ export const Coin = ({
                             }`}>
                             {locallyClaimed
                                 ? `✅ Successfully claimed ${claimedCoins.toFixed(2)} coins and ${claimedXP} XP!`
-                                : availableGroups > 0
-                                    ? `🎉 Ready to claim ${availableCoins.toFixed(2)} + ${availableXP} XP from ${availableGroups} group${availableGroups > 1 ? 's' : ''}!`
+                                : claimableBatches > 0
+                                    ? `🎉 Ready to claim ${claimableRewards.coins.toFixed(2)} + ${claimableRewards.xp} XP from ${claimableBatches} batch${claimableBatches > 1 ? 'es' : ''}!`
                                     : sessionCoins > 0
-                                        ? `💰 Complete ${rewardData.nextGroupTarget - rewardData.nextGroupProgress} more tasks to unlock the next reward group!`
+                                        ? `💰 Complete ${Math.max(0, batchData.currentBatchTarget - batchData.currentBatchProgress)} more tasks to unlock the next batch reward!`
                                         : '*Complete level 3 to claim your reward.'}
                         </p>
 
@@ -520,26 +584,37 @@ export const Coin = ({
                 </header>
             </div>
 
-            {showClaimWarning && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-                    <div className="bg-gradient-to-br from-gray-900 to-black rounded-2xl border border-gray-800 shadow-2xl max-w-sm mx-4 p-6">
-                        <h3 className="text-xl font-bold text-white mb-3">⚠️ Claim Your Rewards?</h3>
-                        <div className="space-y-3 mb-6">
+            {showClaimWarning && typeof document !== 'undefined' && document.body && createPortal(
+                <div
+                    className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+                    style={{ zIndex: 999999 }}
+                    onClick={() => setShowClaimWarning(false)}
+                >
+                    <div
+                        ref={claimModalRef}
+                        className="bg-gradient-to-br from-gray-900 to-black rounded-2xl border border-gray-800 shadow-2xl max-w-sm w-full p-6"
+                        role="dialog"
+                        aria-labelledby="claim-modal-title"
+                        aria-describedby="claim-modal-description"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h3 id="claim-modal-title" className="text-xl font-bold text-white mb-3">⚠️ Claim Your Rewards?</h3>
+                        <div id="claim-modal-description" className="space-y-3 mb-6">
                             <p className="text-gray-300 text-sm">
                                 You're about to claim your session rewards:
                             </p>
                             <div className="bg-gradient-to-r from-yellow-500/10 to-blue-500/10 rounded-lg p-4 border border-yellow-500/20">
                                 <div className="flex justify-between items-center mb-2">
                                     <span className="text-gray-400">Coins:</span>
-                                    <span className="font-bold text-yellow-400 text-lg">{availableCoins.toFixed(2)}</span>
+                                    <span className="font-bold text-yellow-400 text-lg">{claimableRewards.coins.toFixed(2)}</span>
                                 </div>
                                 <div className="flex justify-between items-center mb-2">
                                     <span className="text-gray-400">XP:</span>
-                                    <span className="font-bold text-blue-400 text-lg">{availableXP}</span>
+                                    <span className="font-bold text-blue-400 text-lg">{claimableRewards.xp}</span>
                                 </div>
                                 <div className="flex justify-between items-center">
-                                    <span className="text-gray-400">Available Groups:</span>
-                                    <span className="font-bold text-green-400 text-sm">{availableGroups} group{availableGroups > 1 ? 's' : ''}</span>
+                                    <span className="text-gray-400">Available Batches:</span>
+                                    <span className="font-bold text-green-400 text-sm">{claimableBatches} batch{claimableBatches > 1 ? 'es' : ''}</span>
                                 </div>
                             </div>
                             <p className="text-orange-400 text-sm font-medium">
@@ -561,11 +636,17 @@ export const Coin = ({
                                 disabled={claiming}
                                 className="flex-1 py-3 rounded-lg bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 text-white font-semibold transition-colors disabled:opacity-50"
                             >
-                                {claiming ? 'Claiming...' : 'Confirm Claim'}
+                                {claiming ? (
+                                    <div className="flex items-center justify-center">
+                                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                                        Claiming...
+                                    </div>
+                                ) : 'Confirm Claim'}
                             </button>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
 
             {/* AC-15: Help Tooltip Modal */}
@@ -584,18 +665,29 @@ export const Coin = ({
                 game={game}
             />
 
-            {/* Success Message Modal */}
-            {showSuccessMessage && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-                    <div className="bg-gradient-to-br from-green-900 to-green-800 rounded-2xl border border-green-600 shadow-2xl max-w-sm mx-4 p-6 animate-bounce">
+            {/* Success Message Modal - portaled to body so it stays on top */}
+            {showSuccessMessage && typeof document !== 'undefined' && document.body && createPortal(
+                <div
+                    className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+                    style={{ zIndex: 999999 }}
+                    onClick={() => setShowSuccessMessage(false)}
+                >
+                    <div
+                        ref={successModalRef}
+                        className="bg-gradient-to-br from-green-900 to-green-800 rounded-2xl border border-green-600 shadow-2xl max-w-sm w-full p-6 animate-bounce"
+                        role="dialog"
+                        aria-labelledby="success-modal-title"
+                        aria-describedby="success-modal-description"
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <div className="text-center">
                             <div className="w-16 h-16 bg-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                                 </svg>
                             </div>
-                            <h3 className="text-2xl font-bold text-white mb-2">🎉 Rewards Claimed!</h3>
-                            <div className="bg-green-600/20 rounded-lg p-4 mb-4 border border-green-500/30">
+                            <h3 id="success-modal-title" className="text-2xl font-bold text-white mb-2">🎉 Rewards Claimed!</h3>
+                            <div id="success-modal-description" className="bg-green-600/20 rounded-lg p-4 mb-4 border border-green-500/30">
                                 <div className="flex justify-between items-center mb-2">
                                     <span className="text-green-200">Coins Earned:</span>
                                     <span className="font-bold text-yellow-300 text-lg">{claimedCoins.toFixed(2)}</span>
@@ -606,7 +698,7 @@ export const Coin = ({
                                 </div>
                                 <div className="flex justify-between items-center">
                                     <span className="text-green-200">Groups Claimed:</span>
-                                    <span className="font-bold text-green-300 text-sm">{availableGroups} group{availableGroups > 1 ? 's' : ''}</span>
+                                    <span className="font-bold text-green-300 text-sm">{claimableBatches} batch{claimableBatches > 1 ? 'es' : ''}</span>
                                 </div>
                             </div>
                             <p className="text-green-200 text-sm mb-4">
@@ -620,20 +712,33 @@ export const Coin = ({
                             </button>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
 
-            {/* Error Message Modal */}
-            {errorMessage && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-                    <div className="bg-gradient-to-br from-red-900 to-red-800 rounded-2xl border border-red-600 shadow-2xl max-w-sm mx-4 p-6 animate-pulse">
+            {/* Error Message Modal - portaled to body so it stays on top */}
+            {errorMessage && typeof document !== 'undefined' && document.body && createPortal(
+                <div
+                    className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+                    style={{ zIndex: 999999 }}
+                    onClick={() => setErrorMessage("")}
+                >
+                    <div
+                        ref={errorModalRef}
+                        className="bg-gradient-to-br from-red-900 to-red-800 rounded-2xl border border-red-600 shadow-2xl max-w-sm w-full p-6 animate-pulse"
+                        role="dialog"
+                        aria-labelledby="error-modal-title"
+                        aria-describedby="error-modal-description"
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <div className="text-center">
                             <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M12 5a7 7 0 100 14 7 7 0 000-14z" />
                                 </svg>
                             </div>
-                            <div className="bg-red-600/20 rounded-lg p-4 mb-4 border border-red-500/30">
+                            <h3 id="error-modal-title" className="text-xl font-bold text-white mb-2">⚠️ Error</h3>
+                            <div id="error-modal-description" className="bg-red-600/20 rounded-lg p-4 mb-4 border border-red-500/30">
                                 <p className="text-red-100 text-sm leading-relaxed">{errorMessage}</p>
                             </div>
                             <div className="space-y-2">
@@ -647,7 +752,8 @@ export const Coin = ({
                             </div>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </section>
     );

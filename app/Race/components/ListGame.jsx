@@ -4,7 +4,6 @@ import { useSelector, useDispatch } from "react-redux";
 import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { fetchGamesBySection } from "@/lib/redux/slice/gameSlice";
-import { filterIosTitleGames } from "@/lib/utils/gameFilters";
 // Removed getAgeGroupFromProfile and getGenderFromProfile - now passing user object directly
 
 const RecommendationCard = React.memo(({ card, onCardClick }) => {
@@ -137,56 +136,31 @@ export const ListGame = () => {
                     return true;
                 })
                 .map((game, index) => {
-                    // Use besitosRawData if available, otherwise fallback to existing structure
-                    const rawData = game.besitosRawData || {};
+                    // Use normalizer for both besitos and bitlab
+                    const { normalizeGameImages, normalizeGameTitle, normalizeGameCategory, normalizeGameAmount, getTotalPromisedPoints } = require('@/lib/gameDataNormalizer');
+                    const images = normalizeGameImages(game);
+                    const title = normalizeGameTitle(game);
+                    const category = normalizeGameCategory(game);
+                    const amount = normalizeGameAmount(game);
 
-                    // Calculate coins - use rewards.coins first (from API), then fallback to amount
-                    // Priority: rewards.coins > besitosRawData.amount > game.amount
-                    const coinAmount = game.rewards?.coins || rawData.amount || game.amount || 0;
-                    const earnings = typeof coinAmount === 'number' ? coinAmount.toString() : (typeof coinAmount === 'string' ? coinAmount.replace('$', '') : '0');
+                    // Prefer API rewards.coins / rewards.gold everywhere
+                    const coinAmount = game.rewards?.coins ?? game.rewards?.gold ?? amount ?? 0;
+                    const raw = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(String(coinAmount).replace('$', '')) || 0 : 0);
+                    const earnings = Number.isFinite(raw) ? (raw === Math.round(raw) ? String(Math.round(raw)) : (Math.round(raw * 100) / 100).toString()) : '0';
+                    const { totalXP } = getTotalPromisedPoints(game);
+                    const xpPoints = Number.isFinite(totalXP) ? Math.floor(totalXP).toString() : '0';
 
-                    // Calculate total XP with progressive multiplier (same as game details page)
-                    // Task 1: baseXP × multiplier^0
-                    // Task 2: baseXP × multiplier^1
-                    // Task 3: baseXP × multiplier^2
-                    // ...
-                    // Total = sum of all task XPs
-                    let totalXP = 0;
-                    if (game.rewards?.xp) {
-                        // Use rewards.xp if available
-                        totalXP = game.rewards.xp;
-                    } else {
-                        // Calculate from xpRewardConfig with progressive multiplier
-                        const xpConfig = game.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-                        const baseXP = xpConfig.baseXP || 1;
-                        const multiplier = xpConfig.multiplier || 1;
-
-                        // Get total number of tasks/goals
-                        const goals = rawData.goals || game.goals || [];
-                        const totalTasks = goals.length || 0;
-
-                        // Calculate total XP: sum of baseXP × multiplier^taskIndex for all tasks
-                        // This is a geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1) when multiplier ≠ 1
-                        // When multiplier = 1, it's just baseXP × totalTasks
-                        if (multiplier === 1) {
-                            // Simple case: all tasks have same XP
-                            totalXP = baseXP * totalTasks;
-                        } else if (totalTasks > 0) {
-                            // Geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1)
-                            totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-                        }
-                    }
-
+                    const apiGameId = game.gameId || game.details?.id || game.id || game._id;
                     return {
-                        id: game.id || game._id || game.gameId || `api-game-${index}`,
-                        originalId: game.id || game._id || game.gameId,
-                        title: rawData.title || game.name || game.title || game.details?.name || 'Game',
-                        category: rawData.categories?.[0]?.name || game.categories?.[0] || 'Action',
-                        // Use besitosRawData images first
-                        image: rawData.square_image || rawData.image || game.image || game.square_image || game.background_image || game.icon || game.thumbnail || game.logo || game.banner,
-                        backgroundImage: rawData.large_image || rawData.image || game.image || game.square_image || game.background_image || game.icon || game.thumbnail || game.logo || game.banner,
+                        id: apiGameId || `api-game-${index}`,
+                        originalId: apiGameId,
+                        title: title,
+                        category: category,
+                        // Use normalized images
+                        image: images.square_image || images.icon || game.image || game.square_image || game.background_image || game.icon || game.thumbnail || game.logo || game.banner,
+                        backgroundImage: images.large_image || images.banner || images.square_image || images.icon || game.image || game.square_image || game.background_image || game.icon || game.thumbnail || game.logo || game.banner,
                         earnings: earnings, // Real coins without $ sign
-                        xpPoints: Math.floor(totalXP).toString(), // Real total XP calculated with progressive multiplier
+                        xpPoints, // Total XP from tasks (getTotalPromisedPoints)
                         isDownloaded: false,
                         source: 'api',
                         fullData: game // Store full game including besitosRawData
@@ -198,27 +172,16 @@ export const ListGame = () => {
         // Add downloaded games
         if (inProgressGames && inProgressGames.length > 0) {
             const downloadedGames = inProgressGames.map((game, index) => {
-                // Calculate coins - use rewards.coins first, then fallback to amount
-                const coinAmount = game.rewards?.coins || game.amount || 0;
-                const earnings = typeof coinAmount === 'number' ? coinAmount.toString() : (typeof coinAmount === 'string' ? coinAmount.replace('$', '') : '0');
-
-                // Calculate total XP with progressive multiplier
-                let totalXP = 0;
-                if (game.rewards?.xp) {
-                    totalXP = game.rewards.xp;
-                } else {
-                    const xpConfig = game.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-                    const baseXP = xpConfig.baseXP || 1;
-                    const multiplier = xpConfig.multiplier || 1;
-                    const goals = game.goals || [];
-                    const totalTasks = goals.length || 0;
-
-                    if (multiplier === 1) {
-                        totalXP = baseXP * totalTasks;
-                    } else if (totalTasks > 0) {
-                        totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-                    }
-                }
+                // Prefer API rewards.coins / rewards.gold
+                const coinAmount = game.rewards?.coins ?? game.rewards?.gold ?? game.amount ?? 0;
+                const raw = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(String(coinAmount).replace('$', '')) || 0 : 0);
+                const earnings = Number.isFinite(raw) ? (raw === Math.round(raw) ? String(Math.round(raw)) : (Math.round(raw * 100) / 100).toString()) : '0';
+                let xpPoints = '0';
+                try {
+                    const { getTotalPromisedPoints } = require('@/lib/gameDataNormalizer');
+                    const { totalXP } = getTotalPromisedPoints(game);
+                    xpPoints = Number.isFinite(totalXP) ? Math.floor(totalXP).toString() : '0';
+                } catch (_) {}
 
                 return {
                     id: game.id || game._id || `downloaded-game-${index}`,
@@ -228,7 +191,7 @@ export const ListGame = () => {
                     image: game.square_image || game.large_image || game.image,
                     backgroundImage: game.large_image || game.image,
                     earnings: earnings, // Real coins without $ sign
-                    xpPoints: Math.floor(totalXP).toString(), // Real total XP calculated with progressive multiplier
+                    xpPoints, // Total XP from tasks (getTotalPromisedPoints)
                     isDownloaded: true,
                     source: 'downloaded',
                     fullData: game // Store full game data for navigation
@@ -237,8 +200,8 @@ export const ListGame = () => {
             allGames.push(...downloadedGames);
         }
 
-        // Only show games whose title contains "ios" (case-insensitive)
-        return filterIosTitleGames(allGames);
+
+        return allGames;
     }, [allSectionGames, inProgressGames, gamesBySection]);
 
     // Optimized: Memoized game click handler

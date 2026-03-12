@@ -1,70 +1,109 @@
 "use client";
-import React, { useMemo, useEffect } from 'react'
+import React, { useMemo, useEffect, useCallback } from 'react'
 import { useSelector, useDispatch } from 'react-redux'
 import { useRouter } from 'next/navigation'
 import { fetchGamesBySection } from '@/lib/redux/slice/gameSlice'
+import { normalizeGameImages, normalizeGameTitle, normalizeGameCategory } from '@/lib/gameDataNormalizer'
+
+const EMPTY_ARRAY = [];
 
 export const Frame = () => {
     const router = useRouter();
     const dispatch = useDispatch();
 
-    // Use new game discovery API for Game Tips section
-    const gamesBySection = useSelector((state) => state.games.gamesBySection)
-    const gamesBySectionStatus = useSelector((state) => state.games.gamesBySectionStatus)
+    const sectionName = "Gametips";
+    const CACHE_STALE_MS = 5 * 60 * 1000;
+    const FOCUS_REFRESH_STALE_MS = 2 * 60 * 1000;
 
-    // Fetch game tips on component mount
-    // Using "Swipe" section as it's a reliable section that should have games
-    // If backend has "Game Tips" section configured, it can be changed back
+    const gameTipsGames = useSelector((state) => state.games.gamesBySection[sectionName] ?? EMPTY_ARRAY);
+    const gameTipsStatus = useSelector((state) => state.games.gamesBySectionStatus[sectionName] ?? "idle");
+    const sectionTimestamp = useSelector((state) => state.games.gamesBySectionTimestamp[sectionName]);
+    const { details: userProfile } = useSelector((state) => state.profile);
+
+    // Mount: fetch only if cache is stale and not already loading/failed
     useEffect(() => {
+        const hasFreshCache = sectionTimestamp != null && Date.now() - sectionTimestamp < CACHE_STALE_MS;
+        if (hasFreshCache || gameTipsStatus === "loading" || gameTipsStatus === "failed") return;
         dispatch(fetchGamesBySection({
-            uiSection: "Gametips",
-            ageGroup: "18-24",
-            gender: "male",
+            uiSection: sectionName,
+            user: userProfile,
             page: 1,
-            limit: 10
+            limit: 10,
         }));
-    }, [dispatch]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Memoize the game tips from the new API
+    // Focus/visibility: refresh only when cache is older than FOCUS_REFRESH_STALE_MS
+    useEffect(() => {
+        const handleRefreshIfStale = () => {
+            const state = require("@/lib/redux/store").store.getState();
+            const ts = state.games.gamesBySectionTimestamp[sectionName];
+            const isStale = !ts || Date.now() - ts > FOCUS_REFRESH_STALE_MS;
+            if (!isStale) return;
+            const user = state.profile.details;
+            dispatch(fetchGamesBySection({
+                uiSection: sectionName,
+                user: user || null,
+                page: 1,
+                limit: 10,
+                force: true,
+                background: true,
+            }));
+        };
+        const handleFocus = () => handleRefreshIfStale();
+        const handleVisibility = () => { if (!document.hidden) handleRefreshIfStale(); };
+        window.addEventListener("focus", handleFocus);
+        document.addEventListener("visibilitychange", handleVisibility);
+        return () => {
+            window.removeEventListener("focus", handleFocus);
+            document.removeEventListener("visibilitychange", handleVisibility);
+        };
+    }, [dispatch, sectionName]);
+
+    // Normalize game data using same normalizers as MostPlayedGames
     const gameTips = useMemo(() => {
-        const games = gamesBySection?.["Gametips"] || [];
+        return gameTipsGames.slice(0, 2).map((game, index) => {
+            const images = normalizeGameImages(game);
+            const title = normalizeGameTitle(game);
+            const category = normalizeGameCategory(game);
 
-        return games.slice(0, 2).map((game, index) => {
+            const getOptimizedImage = () => {
+                const candidates = [
+                    images.square_image,
+                    images.icon,
+                    game.details?.square_image,
+                    game.images?.icon,
+                    game.images?.square_image,
+                    game.square_image,
+                    game.image,
+                ];
+                for (const candidate of candidates) {
+                    if (candidate && typeof candidate === 'string' && candidate.trim() !== '' && candidate !== 'null' && candidate !== 'undefined') {
+                        return candidate;
+                    }
+                }
+                return '/placeholder-game.png';
+            };
+
             const rawData = game.besitosRawData || {};
+            const description =
+                rawData.description ||
+                game.details?.description ||
+                game.description ||
+                "Discover an amazing gaming experience";
 
             return {
                 id: game._id || game.id || `game-tip-${index}`,
-                title:
-                    rawData.title ||
-                    game.title ||
-                    game.details?.name ||
-                    "Game",
-
-                description:
-                    rawData.description ||
-                    game.details?.description ||
-                    game.description ||
-                    "Discover an amazing gaming experience",
-
-                // ✅ SAME IMAGE LOGIC AS MOST PLAYED
-                image:
-                    rawData.square_image ||
-                    rawData.image ||
-                    game.details?.square_image ||
-                    game.images?.icon ||
-                    "/placeholder-game.png",
-
+                title,
+                description,
+                image: getOptimizedImage(),
                 imageType: index === 0 ? "bg" : "img",
-                game
+                category,
+                game,
             };
         });
-    }, [gamesBySection]);
+    }, [gameTipsGames]);
 
-
-    // Handle game click - navigate to game tips details page
-    const handleGameClick = (game) => {
-
-        // Get game title for the tips page
+    const handleGameClick = useCallback((game) => {
         const gameTitle = (() => {
             const title = game?.title || game?.details?.name || game?.name || 'Game';
             return title
@@ -73,21 +112,15 @@ export const Frame = () => {
                 .split(' - ')[0]
                 .trim();
         })();
-
-        // Get game image
         const gameImage = game.images?.icon || game.icon || game.square_image || game.image || '';
-
-        // Get game category
         const gameCategory = game.details?.category || (game.categories && game.categories.length > 0
             ? (typeof game.categories[0] === 'object' ? game.categories[0].name || 'Casual' : game.categories[0])
             : 'Casual');
-
         router.push(`/game-tips-details?title=${encodeURIComponent(gameTitle)}&image=${encodeURIComponent(gameImage)}&category=${encodeURIComponent(gameCategory)}`);
-    };
+    }, [router]);
 
-    // Show loading state if games are still loading
-    const swipeStatus = gamesBySectionStatus?.["Swipe"];
-    const isLoading = swipeStatus === 'loading';
+    const isLoading = gameTipsStatus === 'loading';
+    const hasNoData = gameTips.length === 0 && (gameTipsStatus === 'succeeded' || gameTipsStatus === 'failed');
 
     if (isLoading) {
         return (
@@ -99,7 +132,7 @@ export const Frame = () => {
                 <header className="flex items-center justify-around gap-[49px] relative self-stretch w-full flex-[0_0_auto]">
                     <h1
                         id="game-tips-heading"
-                        className="relative w-fit mt-[-1.00px] [font-family:'Poppins',Helvetica] font-semibold text-white-f4f3fc text-xl tracking-[0] leading-[normal]"
+                        className="relative w-fit mt-[-1.00px] [font-family:'Poppins',Helvetica] font-semibold text-white text-xl tracking-[0] leading-[normal]"
                     >
                         🧩 Game Tips ⛳
                     </h1>
@@ -116,10 +149,6 @@ export const Frame = () => {
         );
     }
 
-    // Show message if no games available after section has loaded
-    const swipeLoaded = swipeStatus === 'succeeded' || swipeStatus === 'failed';
-    const hasNoData = gameTips.length === 0 && swipeLoaded;
-
     if (hasNoData) {
         return (
             <section
@@ -130,7 +159,7 @@ export const Frame = () => {
                 <header className="flex items-center justify-around gap-[49px] relative self-stretch w-full flex-[0_0_auto]">
                     <h1
                         id="game-tips-heading"
-                        className="relative w-fit mt-[-1.00px] [font-family:'Poppins',Helvetica] font-semibold text-white-f4f3fc text-xl tracking-[0] leading-[normal]"
+                        className="relative w-fit mt-[-1.00px] [font-family:'Poppins',Helvetica] font-semibold text-white text-xl tracking-[0] leading-[normal]"
                     >
                         🧩 Game Tips ⛳
                     </h1>
@@ -160,7 +189,7 @@ export const Frame = () => {
                 {gameTips.map((tip) => (
                     <article
                         key={tip.id}
-                        className="flex flex-col w-[158px] rounded-md overflow-hidden shadow-lg cursor-pointer hover:scale-105 transition-all duration-200"
+                        className="flex flex-col w-[158px] rounded-[12px] overflow-hidden shadow-lg cursor-pointer hover:scale-105 transition-all duration-200 bg-black"
                         onClick={() => handleGameClick(tip.game)}
                         role="button"
                         tabIndex={0}
@@ -172,38 +201,20 @@ export const Frame = () => {
                         }}
                         aria-label={`View tips for ${tip.title}`}
                     >
-                        {/* Image Section - 120px height as per Figma */}
+                        {/* Image Section */}
                         <div className="relative w-[158px] h-[120px] flex-shrink-0">
-                            {tip.imageType === "bg" ? (
-                                <div
-                                    className="w-full h-full bg-cover bg-center rounded-t-[12px]"
-                                    style={{ backgroundImage: `url(${tip.image})` }}
-                                    role="img"
-                                    aria-label={tip.title}
-                                >
-                                    <img
-                                        src={tip.image}
-                                        alt=""
-                                        className="hidden"
-                                        loading="lazy"
-                                        decoding="async"
-                                        fetchPriority="low"
-                                    />
-                                </div>
-                            ) : (
-                                <img
-                                    className="absolute inset-0 w-full h-full object-cover rounded-t-[12px]"
-                                    alt={tip.title}
-                                    src={tip.image}
-                                    loading="lazy"
-                                    decoding="async"
-                                    fetchPriority="low"
-                                />
-                            )}
+                            <img
+                                className="absolute inset-0 w-full h-full object-cover"
+                                alt={tip.title}
+                                src={tip.image}
+                                loading="lazy"
+                                decoding="async"
+                                onError={(e) => { e.target.src = '/placeholder-game.png'; }}
+                            />
                         </div>
 
-                        {/* Content Section - 111px height as per Figma */}
-                        <div className="flex flex-col h-[111px] p-2.5 bg-[linear-gradient(180deg,rgba(81,98,182,0.9)_0%,rgba(63,56,184,0.9)_100%)] flex-shrink-0 rounded-b-[12px]">
+                        {/* Content Section */}
+                        <div className="flex flex-col h-[111px] p-2.5 bg-[linear-gradient(180deg,rgba(81,98,182,0.9)_0%,rgba(63,56,184,0.9)_100%)] flex-shrink-0">
                             <div className="flex flex-col gap-1 flex-1">
                                 <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-white text-sm leading-tight line-clamp-1 mb-0.5">
                                     {tip.title}
@@ -213,10 +224,7 @@ export const Frame = () => {
                                 </p>
                                 <a
                                     href="#"
-                                    onClick={(e) => {
-                                        e.preventDefault();
-                                        handleGameClick(tip.game);
-                                    }}
+                                    onClick={(e) => { e.preventDefault(); handleGameClick(tip.game); }}
                                     className="[font-family:'Poppins',Helvetica] font-semibold text-[#9eadf7] text-xs leading-4 hover:text-[#b8c5ff] transition-colors mt-auto"
                                     aria-label={`Read more about ${tip.title}`}
                                 >
@@ -230,4 +238,3 @@ export const Frame = () => {
         </section>
     );
 };
-

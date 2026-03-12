@@ -34,7 +34,7 @@ const ProgressSection = ({
                 <div className="flex items-center justify-center gap-x-1.5 w-full">
                     <div className="flex flex-col items-start justify-center ">
                         <div className="text-[14px] font-semibold text-white tabular-nums">
-                            {mainValue}
+                            {120}
                         </div>
                         <div className="text-[14px] font-semibold text-white tabular-nums">
                             {bonusValue}
@@ -48,9 +48,6 @@ const ProgressSection = ({
                                 src="https://c.animaapp.com/3mn7waJw/img/image-3937-12@2x.png"
                                 width={18}
                                 height={19}
-                                loading="eager"
-                                decoding="async"
-                                priority
                             />
                         </div>
                         <div className="w-5 h-5 flex items-center justify-center">
@@ -59,9 +56,6 @@ const ProgressSection = ({
                                 src="https://c.animaapp.com/3mn7waJw/img/pic-7.svg"
                                 width={17}
                                 height={14}
-                                loading="eager"
-                                decoding="async"
-                                priority
                             />
                         </div>
                     </div>

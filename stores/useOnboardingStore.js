@@ -1,70 +1,50 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { updateOnboardingData } from "@/lib/api";
 
 const useOnboardingStore = create(
   persist(
-    (set, get) => ({
-      // Data for Onboarding Steps
+    (set) => ({
+      // Data for Onboarding Steps (collected once, posted at final step via POST /api/onboarding/submit)
       mobile: null,
       currentStep: 1,
+      primaryGoal: null, // "earn" | "save" | "invest" | "learn"
       ageRange: null,
       gender: null,
       gamePreferences: [],
       gameStyle: null,
       gameHabit: null, // UI state, not sent to API
 
-      // Additional Fields for Signup API
+      // Additional fields for onboarding submit API
       improvementArea: "budgeting",
-      dailyEarningGoal: 100,
+      dailyEarningGoal: 900, // default per API doc if omitted
 
-      // Actions
+      // Actions — only update local state; submit happens once at final onboarding (permissions Agree)
       setCurrentStep: (step) => set({ currentStep: step }),
       setMobile: (mobile) => set({ mobile }),
-
-      // Async Setters that call the "save-as-you-go" API
-      setAgeRange: async (age) => {
-        set({ ageRange: age });
-        const mobile = get().mobile;
-        if (mobile) {
-          try {
-            await updateOnboardingData("ageRange", age, mobile);
-          } catch (error) {
-            console.error("Failed to save age range:", error.message);
-          }
-        }
-      },
-
-      setGender: async (gender) => {
-        set({ gender });
-        const mobile = get().mobile;
-        if (mobile) {
-          try {
-            await updateOnboardingData("gender", gender, mobile);
-          } catch (error) {
-            console.error("Failed to save gender:", error.message);
-          }
-        }
-      },
-
-      // Setters that only update local state
+      setPrimaryGoal: (goal) => set({ primaryGoal: goal }),
+      setAgeRange: (age) => set({ ageRange: age }),
+      setGender: (gender) => set({ gender }),
       setGamePreferences: (preferences) =>
         set({ gamePreferences: preferences }),
       setGameStyle: (style) => set({ gameStyle: style }),
       setGameHabit: (habit) => set({ gameHabit: habit }),
+      setImprovementArea: (area) => set({ improvementArea: area }),
+      setDailyEarningGoal: (goal) =>
+        set({ dailyEarningGoal: goal != null ? Number(goal) : 900 }),
 
-      // Reset the store after a successful signup
+      // Reset the store after onboarding has been submitted
       resetOnboarding: () =>
         set({
           mobile: null,
           currentStep: 1,
+          primaryGoal: null,
           ageRange: null,
           gender: null,
           gamePreferences: [],
           gameStyle: null,
           gameHabit: null,
           improvementArea: "budgeting",
-          dailyEarningGoal: 100,
+          dailyEarningGoal: 900,
         }),
 
       loadFromStorage: () => Promise.resolve(),
@@ -72,8 +52,8 @@ const useOnboardingStore = create(
     {
       name: "onboarding-storage",
       storage: createJSONStorage(() => localStorage),
-    }
-  )
+    },
+  ),
 );
 
 export default useOnboardingStore;

@@ -39,9 +39,6 @@ export const GoalsAndTargetsSection = () => {
         { key: "savings", label: "Savings (Per Month)", max: 9999 },
         { key: "revenueGoal", label: "Revenue Goal from Jackson", max: 9999 },
     ];
-    // All goals have default value of 40, so button should always be enabled
-    const areAllGoalsSet = goalData.every(goal => (goals[goal.key] || 40) >= 40);
-    const isButtonDisabled = !areAllGoalsSet;
     return (
         <section className="flex  flex-col w-full justify-center mb-30 mt-7 items-start gap-2 relative">
             <header className="flex w-full items-center justify-between  ml-1 relative">
@@ -57,8 +54,7 @@ export const GoalsAndTargetsSection = () => {
             <div className="relative w-full p-5 bg-black rounded-[10px] shadow-[2.48px_2.48px_18.58px_#a6aabc4c,-1.24px_-1.24px_16.1px_#f9faff1a]">
                 <div className="flex flex-col w-full items-start gap-4">
                     {goalData.map((goal, index) => {
-                        // Default value is 40 as per requirement
-                        const currentValue = goals[goal.key] || 40;
+                        const currentValue = goals[goal.key] ?? 0;
                         const progress = (currentValue / goal.max) * 100;
                         const sliderStyle = {
                             background: `linear-gradient(to right, #6a6dcd ${progress}%, #307fe24c ${progress}%)`,
@@ -79,37 +75,33 @@ export const GoalsAndTargetsSection = () => {
                                     >
                                         {goal.label}
                                     </label>
-                                    <div className="relative w-24 h-8 flex items-center justify-center text-center rounded-md bg-[#1C1C1E]">
+                                    <div className="relative min-w-0 h-8 flex items-center justify-center gap-1.5 rounded-md bg-[#1C1C1E] px-2">
                                         <input
                                             id={`goal-${goal.key}`}
                                             type="number"
                                             value={currentValue}
                                             onChange={(e) => handleValueChange(goal.key, e.target.value)}
-                                            className="w-full [font-family:'Poppins',Helvetica] font-bold text-[#d9d9d9] text-sm text-center bg-transparent border-none outline-none p-1 pr-8"
+                                            className="w-10 min-w-0 [font-family:'Poppins',Helvetica] font-bold text-[#d9d9d9] text-sm text-center bg-transparent border-none outline-none p-0 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                                             min="0"
                                             max={goal.max}
                                         />
-                                        <img src="/dollor.png" alt="$" className="w-5 h-5 absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none" loading="eager" decoding="async" fetchPriority="high" width={20} height={20} />
+                                        <img
+                                            className="w-[18px] h-5 flex-shrink-0"
+                                            alt="Coin"
+                                            src="/dollor.png"
+                                        />
                                     </div>
                                 </div>
-                                <div className="relative w-full pt-4">
-                                    <div className="absolute -top-0 transform -translate-x-1/2" style={{ left: `${progress}%`, zIndex: 10 }}>
-                                        <div className="flex items-center bg-[#2f3276] p-1 rounded-md shadow-lg">
-                                            <span className="text-white text-xs font-bold">{currentValue}</span>
-                                            {/* <img src="/dollor.png" alt="$" className="w-3 h-3 ml-1" /> */}
-                                        </div>
-                                    </div>
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max={goal.max}
-                                        step="1"
-                                        value={currentValue}
-                                        onChange={(e) => handleValueChange(goal.key, e.target.value)}
-                                        style={sliderStyle}
-                                        className="w-full h-2 rounded-lg appearance-none cursor-pointer accent-[#6a6dcd]"
-                                    />
-                                </div>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max={goal.max}
+                                    step="1"
+                                    value={currentValue}
+                                    onChange={(e) => handleValueChange(goal.key, e.target.value)}
+                                    style={sliderStyle}
+                                    className="w-full h-2 rounded-lg appearance-none cursor-pointer accent-[#6a6dcd]"
+                                />
                             </div>
                         );
                     })}

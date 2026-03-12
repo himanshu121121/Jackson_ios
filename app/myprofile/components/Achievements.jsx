@@ -109,9 +109,8 @@ const Achievements = () => {
                             className="absolute top-[15px] left-0"
                             alt={achievement.title || achievement.name}
                             src={achievement.image || achievement.icon || 'https://c.animaapp.com/V1uc3arn/img/image-3926@2x.png'}
-                            loading="eager"
+                            loading="lazy"
                             decoding="async"
-                            priority
                         />
                     </div>
 
@@ -148,9 +147,8 @@ const Achievements = () => {
                                     className="ml-1"
                                     alt="Trophy"
                                     src={`/xp.svg`}
-                                    loading="eager"
+                                    loading="lazy"
                                     decoding="async"
-                                    priority
                                 />
                             </div>
                         </div>

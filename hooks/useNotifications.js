@@ -17,6 +17,11 @@ export const useNotifications = (token) => {
   const { details: profile } = useSelector((state) => state.profile);
   const notificationsEnabled =
     (profile?.profile?.notifications ?? false) === true;
+  // Timestamp saved to backend when user last re-enabled notifications.
+  // Stored server-side so it persists across devices, logouts, and account switches.
+  const notificationsReenabledAt = profile?.profile?.notificationsReenabledAt
+    ? new Date(profile.profile.notificationsReenabledAt).getTime()
+    : 0;
 
   const fetchNotifications = async () => {
     if (!token) {
@@ -33,29 +38,33 @@ export const useNotifications = (token) => {
       setLoading(true);
       setError(null);
 
-      
-
       const response = await getUserNotifications(token);
 
-
       if (response && response.success && response.data) {
-        // Filter out only dismissed notifications (not read ones)
-        // According to docs, we should show notifications that are not dismissed
+        // Filter out dismissed notifications.
+        // Also filter out notifications created BEFORE the last re-enable timestamp
+        // (stored on the backend profile) so queued notifications from when
+        // notifications were disabled don't flood the user on re-enable.
         const unreadNotifications = Array.isArray(response.data)
-          ? response.data.filter((notif) => !notif.dismissed)
+          ? response.data.filter((notif) => {
+              if (notif.dismissed) return false;
+              if (notificationsReenabledAt && notif.createdAt) {
+                return (
+                  new Date(notif.createdAt).getTime() >=
+                  notificationsReenabledAt
+                );
+              }
+              return true;
+            })
           : [];
-
-        
 
         setNotifications(unreadNotifications);
       } else if (response && !response.success) {
-       
         setError(
-          response.error || response.message || "Failed to fetch notifications"
+          response.error || response.message || "Failed to fetch notifications",
         );
         setNotifications([]);
       } else {
-        
         setNotifications([]);
       }
     } catch (err) {
@@ -76,19 +85,19 @@ export const useNotifications = (token) => {
       if (response.success) {
         // Remove dismissed notification from state
         setNotifications((prev) =>
-          prev.filter((notif) => notif._id !== notificationId)
+          prev.filter((notif) => notif._id !== notificationId),
         );
       } else {
         // Even if API call fails, remove from UI to prevent re-showing
         setNotifications((prev) =>
-          prev.filter((notif) => notif._id !== notificationId)
+          prev.filter((notif) => notif._id !== notificationId),
         );
       }
     } catch (error) {
       console.error("Error dismissing notification:", error);
       // Remove from UI anyway to prevent showing again
       setNotifications((prev) =>
-        prev.filter((notif) => notif._id !== notificationId)
+        prev.filter((notif) => notif._id !== notificationId),
       );
     }
   };
@@ -117,20 +126,20 @@ export const useNotifications = (token) => {
   const currentNotification =
     notifications.length > 0 ? notifications[0] : null;
 
-  console.log("🔔 [Notifications] Current state:", {
-    notificationsCount: notifications.length,
-    currentNotification: currentNotification
-      ? {
-          id: currentNotification._id,
-          message: currentNotification.message,
-          type: currentNotification.type,
-        }
-      : null,
-    loading,
-    error,
-    notificationsEnabled,
-    hasProfile: !!profile,
-  });
+  // console.log("🔔 [Notifications] Current state:", {
+  //   notificationsCount: notifications.length,
+  //   currentNotification: currentNotification
+  //     ? {
+  //         id: currentNotification._id,
+  //         message: currentNotification.message,
+  //         type: currentNotification.type,
+  //       }
+  //     : null,
+  //   loading,
+  //   error,
+  //   notificationsEnabled,
+  //   hasProfile: !!profile,
+  // });
 
   return {
     notifications,

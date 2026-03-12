@@ -14,6 +14,55 @@ const FullTransactionHistroy = () => {
     // Get full transactions from Redux store
     const { fullTransactions, fullTransactionsStatus, pagination } = useSelector((state) => state.walletTransactions);
 
+    // Fetch full transactions on mount if not already loaded (stale-while-revalidate pattern)
+    // Shows cached data immediately, fetches fresh data in background
+    useEffect(() => {
+        if (!token) return;
+
+        // Only fetch if status is idle (not already loading/fetched)
+        // The stale-while-revalidate pattern in the slice will handle cache checking
+        if (fullTransactionsStatus === 'idle') {
+            dispatch(fetchFullWalletTransactions({
+                token,
+                page: 1,
+                limit: 20,
+                type: "all"
+            }));
+        } else if (fullTransactionsStatus === 'succeeded' && fullTransactions.length > 0) {
+            // If we have cached data, trigger background refresh to get latest
+            setTimeout(() => {
+                dispatch(fetchFullWalletTransactions({
+                    token,
+                    page: 1,
+                    limit: 20,
+                    type: "all",
+                    background: true
+                }));
+            }, 100);
+        }
+    }, [token, fullTransactionsStatus, dispatch]);
+
+    // Auto-refresh transactions when app comes to foreground (in background, non-blocking)
+    useEffect(() => {
+        if (!token) return;
+
+        const handleFocus = () => {
+            // Refresh in background when user returns to app
+            dispatch(fetchFullWalletTransactions({
+                token,
+                page: 1,
+                limit: 20,
+                type: "all",
+                background: true
+            }));
+        };
+
+        window.addEventListener("focus", handleFocus);
+
+        return () => {
+            window.removeEventListener("focus", handleFocus);
+        };
+    }, [token, dispatch]);
 
     const handleBack = () => {
         router.back();

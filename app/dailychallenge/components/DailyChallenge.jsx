@@ -5,6 +5,7 @@ import { useAuth } from "../../../contexts/AuthContext";
 import {
     fetchCalendar,
     fetchToday,
+    fetchBonusDays,
     setModalOpen,
     clearError
 } from "../../../lib/redux/slice/dailyChallengeSlice";
@@ -22,40 +23,99 @@ export const DailyChallenge = () => {
         streak,
         calendarStatus,
         todayStatus,
+        bonusDaysStatus,
+        bonusDaysCacheTimestamp,
         modalOpen,
         error
     } = useSelector((state) => state.dailyChallenge || {});
 
+    const [pullRefreshState, setPullRefreshState] = useState('idle'); // 'idle', 'pulling', 'refreshing'
+    const [pullDistance, setPullDistance] = useState(0);
+    const touchStartY = useRef(0);
+    const isPulling = useRef(false);
+
     const [isMonthLoading, setIsMonthLoading] = useState(false);
     const [pendingCalendar, setPendingCalendar] = useState(null);
+    const [showCompletedModal, setShowCompletedModal] = useState(false);
     const calendarCacheRef = useRef({});
     const isLoading = calendarStatus === "loading" || todayStatus === "loading" || isMonthLoading;
 
-    // Fetch data on component mount (only if not already prefetched)
-    useEffect(() => {
-        if (!token) {
-            return;
+    // Handle pull-to-refresh
+    const handleTouchStart = (e) => {
+        if (window.scrollY === 0 && !isLoading) {
+            touchStartY.current = e.touches[0].clientY;
+            isPulling.current = true;
         }
+    };
+
+    const handleTouchMove = (e) => {
+        if (!isPulling.current || isLoading) return;
+
+        const currentY = e.touches[0].clientY;
+        const distance = currentY - touchStartY.current;
+
+        if (distance > 0) {
+            e.preventDefault();
+            const pullDistance = Math.min(distance * 0.5, 80); // Max pull distance of 80px
+            setPullDistance(pullDistance);
+
+            if (pullDistance > 50) {
+                setPullRefreshState('pulling');
+            }
+        }
+    };
+
+    const handleTouchEnd = () => {
+        if (!isPulling.current) return;
+
+        isPulling.current = false;
+
+        if (pullDistance > 50) {
+            setPullRefreshState('refreshing');
+            handleRefresh();
+
+            // Reset after animation
+            setTimeout(() => {
+                setPullRefreshState('idle');
+                setPullDistance(0);
+            }, 1000);
+        } else {
+            setPullRefreshState('idle');
+            setPullDistance(0);
+        }
+    };
+
+    // Fetch all data on component mount — calendar, today, and bonus days (progress bar)
+    useEffect(() => {
+        if (!token) return;
 
         const now = new Date();
         const year = now.getFullYear();
         const month = now.getMonth();
+        const CACHE_STALE_MS = 5 * 60 * 1000;
 
-        // Avoid duplicate requests if prefetch already ran
         if (calendarStatus === "idle") {
             dispatch(fetchCalendar({ year, month, token }));
         }
         if (todayStatus === "idle") {
             dispatch(fetchToday({ token }));
         }
-    }, [dispatch, token, calendarStatus, todayStatus]);
+        // fetchBonusDays is owned here — ChallengeGroupSection only reads Redux, never dispatches
+        const hasFreshBonus = bonusDaysCacheTimestamp && Date.now() - bonusDaysCacheTimestamp < CACHE_STALE_MS;
+        if (!hasFreshBonus && bonusDaysStatus !== "loading") {
+            dispatch(fetchBonusDays({ token }));
+        }
+    }, [dispatch, token]); // Only depend on dispatch and token to prevent infinite loops
 
-    // Clear errors when component unmounts
+    // Listen for global challenge update events
     useEffect(() => {
-        return () => {
-            dispatch(clearError());
+        const handleChallengeUpdate = () => {
+            handleRefresh();
         };
-    }, [dispatch]);
+
+        window.addEventListener('dailyChallengeUpdate', handleChallengeUpdate);
+        return () => window.removeEventListener('dailyChallengeUpdate', handleChallengeUpdate);
+    }, [token]); // Include token in dependency to ensure handleRefresh has latest token
 
     // Keep local loading true during month navigation until calendar request settles
     useEffect(() => {
@@ -100,7 +160,7 @@ export const DailyChallenge = () => {
                     calendarCacheRef.current[cacheKey] = resp.data;
                 }
             } catch (_e) {
-                // Ignore prefetch errors silently
+                // ignore prefetch errors
             }
         });
     }, [token, calendar?.year, calendar?.month]);
@@ -153,12 +213,8 @@ export const DailyChallenge = () => {
 
     // Handle month navigation
     const handlePreviousMonth = () => {
-        if (isMonthLoading || calendarStatus === "loading") {
-            return;
-        }
-        if (!token) {
-            return;
-        }
+        if (isMonthLoading || calendarStatus === "loading") return;
+        if (!token) return;
 
         const currentDate = new Date(calendar?.year || new Date().getFullYear(), calendar?.month || new Date().getMonth());
         const previousMonth = new Date(currentDate);
@@ -178,12 +234,8 @@ export const DailyChallenge = () => {
     };
 
     const handleNextMonth = () => {
-        if (isMonthLoading || calendarStatus === "loading") {
-            return;
-        }
-        if (!token) {
-            return;
-        }
+        if (isMonthLoading || calendarStatus === "loading") return;
+        if (!token) return;
 
         const currentDate = new Date(calendar?.year || new Date().getFullYear(), calendar?.month || new Date().getMonth());
         const nextMonth = new Date(currentDate);
@@ -202,9 +254,57 @@ export const DailyChallenge = () => {
         }));
     };
 
-    // Handle today's challenge click
+    // Handle refresh - force refresh calendar, today, and bonus days together
+    const handleRefresh = () => {
+        if (!token) return;
+
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth();
+
+        dispatch(fetchCalendar({ year, month, token, force: true }));
+        dispatch(fetchToday({ token, force: true }));
+        dispatch(fetchBonusDays({ token, force: true }));
+    };
+
+    // Handle today click - navigate to current month and open today's challenge
     const handleTodayClick = () => {
-        dispatch(setModalOpen(true));
+        if (isMonthLoading || calendarStatus === "loading") return;
+        if (!token) return;
+
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth();
+
+        // Check if we're already on the current month
+        const isCurrentMonth = calendar?.year === currentYear && calendar?.month === currentMonth;
+
+        if (!isCurrentMonth) {
+            setIsMonthLoading(true);
+            {
+                const key = `${currentYear}-${currentMonth}`;
+                const cached = calendarCacheRef.current[key];
+                setPendingCalendar(cached || generateSkeletonCalendar(currentYear, currentMonth));
+            }
+            dispatch(fetchCalendar({
+                year: currentYear,
+                month: currentMonth,
+                token
+            }));
+        } else {
+            // Already on current month, open today's challenge modal
+            if (today?.hasChallenge) {
+                const isCompleted = today?.progress?.status === "completed" || today?.completed === true;
+                if (isCompleted) {
+                    setShowCompletedModal(true);
+                } else {
+                    dispatch(setModalOpen(true));
+                }
+            } else {
+                // Show message that no challenge is available today
+                alert("No challenge available for today. Check back tomorrow!");
+            }
+        }
     };
 
     // Generate streak indicators dynamically based on streak data
@@ -312,7 +412,39 @@ export const DailyChallenge = () => {
         <div
             className="relative w-full min-h-screen bg-black flex flex-col items-center"
             data-model-id="3291:8378"
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
         >
+            {/* Pull-to-refresh indicator */}
+            {(pullRefreshState === 'pulling' || pullRefreshState === 'refreshing') && (
+                <div
+                    className="absolute top-0 left-0 right-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300"
+                    style={{
+                        height: pullDistance,
+                        transform: `translateY(${pullRefreshState === 'refreshing' ? 0 : -pullDistance}px)`
+                    }}
+                >
+                    <div className="flex items-center gap-2 text-white">
+                        <svg
+                            className={`w-5 h-5 ${pullRefreshState === 'refreshing' ? 'animate-spin' : ''}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                        >
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                            />
+                        </svg>
+                        <span className="text-sm font-medium">
+                            {pullRefreshState === 'refreshing' ? 'Refreshing...' : 'Pull to refresh'}
+                        </span>
+                    </div>
+                </div>
+            )}
             <div className="absolute top-[8px] left-7 [font-family:'Poppins',Helvetica] font-light text-[#A4A4A4] text-[10px] tracking-[0] leading-3 whitespace-nowrap">
                 App Version: V0.0.1
             </div>
@@ -321,25 +453,39 @@ export const DailyChallenge = () => {
 
             <header className="flex flex-col w-full max-w-[375px] items-start gap-2 px-5 py-3 mt-[36px]">
                 <nav className="items-center gap-4 self-stretch w-full rounded-[32px] flex relative flex-[0_0_auto]">
-                    <button aria-label="Go back"
-                        onClick={() => router.back()}>
-
+                    <button aria-label="Go back">
                         <img
                             className="relative w-6 h-6"
                             alt="Arrow back ios new"
                             src="https://c.animaapp.com/b23YVSTi/img/arrow-back-ios-new@2x.png"
-                            loading="eager"
-                            decoding="async"
-                            width="24"
-                            height="24"
                         />
                     </button>
 
-                    <h1 className="relative w-[255px] [font-family:'Poppins',Helvetica] font-semibold text-white text-xl tracking-[0] leading-5">
+                    <h1 className="relative flex-1 [font-family:'Poppins',Helvetica] font-semibold text-white text-xl tracking-[0] leading-5">
                         Daily Challenge
                     </h1>
 
-
+                    <button
+                        onClick={handleRefresh}
+                        disabled={isLoading}
+                        className={`relative w-6 h-6 transition-opacity ${isLoading ? 'opacity-50' : 'hover:opacity-80'}`}
+                        aria-label="Refresh challenges"
+                        title="Refresh challenges"
+                    >
+                        <svg
+                            className={`w-6 h-6 ${isLoading ? 'animate-spin text-gray-400' : 'text-white'}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                        >
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                            />
+                        </svg>
+                    </button>
                 </nav>
             </header>
 
@@ -360,9 +506,13 @@ export const DailyChallenge = () => {
                         onDayClick={(dayData) => {
                             if (dayData.isToday) {
                                 if (today?.hasChallenge) {
-                                    dispatch(setModalOpen(true));
+                                    const isCompleted = today?.progress?.status === "completed" || today?.completed === true;
+                                    if (isCompleted) {
+                                        setShowCompletedModal(true);
+                                    } else {
+                                        dispatch(setModalOpen(true));
+                                    }
                                 } else {
-                                    // Show message that no challenge is available today
                                     alert("No challenge available for today. Check back tomorrow!");
                                 }
                             }
@@ -459,6 +609,40 @@ export const DailyChallenge = () => {
 
 
 
+
+            {/* Already Completed Modal */}
+            {showCompletedModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-gray-900 rounded-lg p-6 w-full max-w-sm border border-gray-700">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold text-white">
+                                {today?.challenge?.title || today?.challenge?.gameName || "Spin the Wheel"}
+                            </h2>
+                            <button
+                                onClick={() => setShowCompletedModal(false)}
+                                className="text-gray-400 hover:text-white text-2xl"
+                            >
+                                ×
+                            </button>
+                        </div>
+                        <div className="flex flex-col items-center gap-3 py-4">
+                            <span className="text-4xl">✅</span>
+                            <p className="text-white text-base font-semibold text-center">
+                                {today?.challenge?.type === "spin" ? "Spin Completed!" : "Challenge Completed!"}
+                            </p>
+                            <p className="text-gray-400 text-sm text-center">
+                                You've already completed today's challenge. Come back tomorrow!
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setShowCompletedModal(false)}
+                            className="w-full mt-2 py-3 rounded-lg bg-gradient-to-b from-[#9EADF7] to-[#716AE7] text-white font-semibold text-sm"
+                        >
+                            Got it
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* Challenge Modal */}
             <ChallengeModal

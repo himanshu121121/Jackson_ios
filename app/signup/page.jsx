@@ -5,8 +5,9 @@ import Link from "next/link";
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import useOnboardingStore from '@/stores/useOnboardingStore';
-import { sendOtp, verifyOtp } from '@/lib/api';
+import { sendOtp, verifyOtp, checkMobileAvailability } from '@/lib/api';
 import Script from 'next/script';
+import { sendFirebaseOtp, verifyFirebaseOtp } from "@/lib/firebaseOtp";
 
 const validateName = (name, fieldName = 'Name') => {
   const trimmedName = name.trim();
@@ -33,7 +34,7 @@ const validateName = (name, fieldName = 'Name') => {
 
 const SignUp = () => {
   const router = useRouter();
-  const { signUpAndSignIn } = useAuth();
+  const { signUpAndSignIn, signIn } = useAuth();
   const [formData, setFormData] = useState({
     firstname: "",
     lastname: "",
@@ -41,12 +42,13 @@ const SignUp = () => {
     mobile: "",
     password: "",
     confirmPassword: "",
-    otp: new Array(4).fill(""),
+    otp: new Array(6).fill(""), // Firebase uses 6 digits
   });
 
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadings, setIsLoadings] = useState(false);
   const [isLoadingss, setIsLoadingss] = useState(false);
+  const [firebaseIdToken, setFirebaseIdToken] = useState(null);
 
 
   const [error, setError] = useState({});
@@ -55,7 +57,7 @@ const SignUp = () => {
   const [countryCode, setCountryCode] = useState("+91");
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [isMobileVerified, setIsMobileVerified] = useState(false);
-  const [countdown, setCountdown] = useState(60);
+  const [countdown, setCountdown] = useState(180);
   const [isResending, setIsResending] = useState(false);
   const otpInputs = useRef([]);
   const [turnstileToken, setTurnstileToken] = useState(null);
@@ -63,16 +65,28 @@ const SignUp = () => {
   const turnstileRef = useRef(null);
   const turnstileWidgetId = useRef(null);
 
-
-
-
   useEffect(() => {
     let timer;
     if (isOtpSent && countdown > 0 && !isMobileVerified) {
-      timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+      timer = setInterval(() => setCountdown(prev => prev - 1), 1000);
     }
-    return () => clearTimeout(timer);
+    return () => clearInterval(timer);
   }, [isOtpSent, countdown, isMobileVerified]);
+
+  const formatTime = (sec) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+
+  // useEffect(() => {
+  //   let timer;
+  //   if (isOtpSent && countdown > 0 && !isMobileVerified) {
+  //     timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+  //   }
+  //   return () => clearTimeout(timer);
+  // }, [isOtpSent, countdown, isMobileVerified]);
 
   // ============================================================
   // CLOUDFLARE TURNSTILE - MANUAL RENDERING FOR CLIENT-SIDE NAVIGATION
@@ -106,7 +120,10 @@ const SignUp = () => {
           // Manually render the widget
           setIsTurnstileLoading(true);
           const widgetId = window.turnstile.render(turnstileRef.current, {
-            sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+            sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || (() => {
+              console.warn("⚠️ [Turnstile] NEXT_PUBLIC_TURNSTILE_SITE_KEY is not set. Please add it to your .env file.");
+              return '1x00000000000000000000AA'; // Test key - replace with production key
+            })(),
             callback: (token) => {
               setTurnstileToken(token);
               setIsTurnstileLoading(false);
@@ -124,6 +141,7 @@ const SignUp = () => {
             },
             theme: 'dark',
             size: 'normal',
+
           });
 
           // Mark as loaded after widget renders (usually takes ~500ms)
@@ -243,58 +261,58 @@ const SignUp = () => {
     }
   };
 
-  const handleSendOtp = async () => {
-    setError({});
-    if (!formData.mobile.trim() || (countryCode === "+91" && !/^[6-9]\d{9}$/.test(formData.mobile))) {
-      setError({ mobile: "Please enter a valid 10-digit Indian mobile number." });
-      return;
-    }
-    setIsLoadingss(true);
-    try {
-      await sendOtp(`${countryCode}${formData.mobile}`);
-      setIsOtpSent(true);
-      setCountdown(60); // Reset timer
-      setTimeout(() => otpInputs.current[0]?.focus(), 100); // Focus the first OTP box
-    } catch (err) {
-      setError({ mobile: err.message || "Failed to send OTP. Please try again." });
-    } finally {
-      setIsLoadingss(false);
-    }
-  };
+  // const handleSendOtp = async () => {
+  //   setError({});
+  //   if (!formData.mobile.trim() || (countryCode === "+91" && !/^[6-9]\d{9}$/.test(formData.mobile))) {
+  //     setError({ mobile: "Please enter a valid 10-digit Indian mobile number." });
+  //     return;
+  //   }
+  //   setIsLoadingss(true);
+  //   try {
+  //     await sendOtp(`${countryCode}${formData.mobile}`);
+  //     setIsOtpSent(true);
+  //     setCountdown(60); // Reset timer
+  //     setTimeout(() => otpInputs.current[0]?.focus(), 100); // Focus the first OTP box
+  //   } catch (err) {
+  //     setError({ mobile: err.message || "Failed to send OTP. Please try again." });
+  //   } finally {
+  //     setIsLoadingss(false);
+  //   }
+  // };
 
-  const handleResendOtp = async () => {
-    if (countdown > 0) return;
-    setIsResending(true);
-    try {
-      await sendOtp(`${countryCode}${formData.mobile}`);
-      setFormData(prev => ({ ...prev, otp: new Array(4).fill("") })); // Clear old OTP
-      setCountdown(60);
-      setError({});
-      otpInputs.current[0]?.focus();
-    } catch (err) {
-      setError({ otp: err.message || "Failed to resend OTP." });
-    } finally {
-      setIsResending(false);
-    }
-  };
+  // const handleResendOtp = async () => {
+  //   if (countdown > 0) return;
+  //   setIsResending(true);
+  //   try {
+  //     await sendOtp(`${countryCode}${formData.mobile}`);
+  //     setFormData(prev => ({ ...prev, otp: new Array(4).fill("") })); // Clear old OTP
+  //     setCountdown(60);
+  //     setError({});
+  //     otpInputs.current[0]?.focus();
+  //   } catch (err) {
+  //     setError({ otp: err.message || "Failed to resend OTP." });
+  //   } finally {
+  //     setIsResending(false);
+  //   }
+  // };
 
-  const handleVerifyOtp = async () => {
-    const otpCode = formData.otp.join('');
-    if (otpCode.length < 4) {
-      setError({ otp: "Please enter the full 4-digit code." });
-      return;
-    }
-    setIsLoadings(true);
-    try {
-      await verifyOtp(`${countryCode}${formData.mobile}`, otpCode);
-      setIsMobileVerified(true);
-      setError({});
-    } catch (err) {
-      setError({ otp: err.message || "An unknown verification error occurred." });
-    } finally {
-      setIsLoadings(false);
-    }
-  }
+  // const handleVerifyOtp = async () => {
+  //   const otpCode = formData.otp.join('');
+  //   if (otpCode.length < 4) {
+  //     setError({ otp: "Please enter the full 4-digit code." });
+  //     return;
+  //   }
+  //   setIsLoadings(true);
+  //   try {
+  //     await verifyOtp(`${countryCode}${formData.mobile}`, otpCode);
+  //     setIsMobileVerified(true);
+  //     setError({});
+  //   } catch (err) {
+  //     setError({ otp: err.message || "An unknown verification error occurred." });
+  //   } finally {
+  //     setIsLoadings(false);
+  //   }
+  // }
 
 
   const handleSubmit = async (e) => {
@@ -319,8 +337,8 @@ const SignUp = () => {
     }
     if (!formData.mobile.trim()) {
       clientErrors.mobile = "Mobile number is required.";
-    } else if (countryCode === "+91" && !/^[6-9]\d{9}$/.test(formData.mobile)) {
-      clientErrors.mobile = "Please enter a valid 10-digit Indian mobile number.";
+    } else if (!/^\d{5,15}$/.test(formData.mobile)) {
+      clientErrors.mobile = "Please enter a valid mobile number (5-15 digits).";
     }
     if (!formData.password) {
       clientErrors.password = "Password is required.";
@@ -372,7 +390,8 @@ const SignUp = () => {
         gameStyle: onboardingData.gameStyle,
         improvementArea: onboardingData.improvementArea,
         dailyEarningGoal: onboardingData.dailyEarningGoal,
-        turnstileToken: turnstileToken, // Include Turnstile token (automatically generated)
+        turnstileToken: turnstileToken,
+        firebaseToken: firebaseIdToken// Include Turnstile token (automatically generated)
       };
 
       const result = await signUpAndSignIn(fullSignupData);
@@ -381,16 +400,52 @@ const SignUp = () => {
       // We only need to handle the error case here.
       if (!result.ok) {
         const backendError = result?.error;
-        if (backendError && backendError.errors) {
-          const newErrors = {};
-          backendError.errors.forEach(err => {
-            if (err.param) newErrors[err.param] = err.msg;
-          });
-          setError(newErrors);
+
+        // Extract error message from various possible structures
+        const errorMessage =
+          backendError?.error ||
+          backendError?.message ||
+          backendError?.body?.error ||
+          backendError?.body?.message ||
+          (backendError?.body?.errors && backendError.body.errors[0]?.msg) ||
+          "";
+
+        // Check if error is "Email already exists" or similar
+        const isEmailExistsError =
+          errorMessage.toLowerCase().includes("email already exists") ||
+          errorMessage.toLowerCase().includes("user already exists") ||
+          errorMessage.toLowerCase().includes("email is already registered") ||
+          errorMessage.toLowerCase().includes("email already registered");
+
+        // If user already exists, attempt to log them in instead
+        if (isEmailExistsError) {
+          try {
+            const loginResult = await signIn(formData.email, formData.password, turnstileToken);
+
+            if (loginResult.ok) {
+              // Login successful - AuthProvider will handle redirect
+              return;
+            } else {
+              // Login failed - show error
+              setError({ form: "Account exists but password is incorrect. Please try logging in." });
+            }
+          } catch (loginErr) {
+            // Login attempt failed - show original error
+            setError({ form: "Account already exists. Please try logging in instead." });
+          }
         } else {
-          const errorMessage = backendError?.error || backendError?.message || "An unknown error occurred. Please try again.";
-          setError({ form: errorMessage });
+          // Handle other errors normally
+          if (backendError && backendError.errors) {
+            const newErrors = {};
+            backendError.errors.forEach(err => {
+              if (err.param) newErrors[err.param] = err.msg;
+            });
+            setError(newErrors);
+          } else {
+            setError({ form: errorMessage || "An unknown error occurred. Please try again." });
+          }
         }
+
         // Reset Turnstile on error so user can try again
         resetTurnstileWidget();
         setTurnstileToken(null);
@@ -410,6 +465,86 @@ const SignUp = () => {
     e.preventDefault();
     router.push('/login');
   };
+
+  // const handleSendOtp = async () => {
+  //   setError({});
+  //   const fullNumber = `${countryCode}${formData.mobile}`;
+
+  //   setIsLoadingss(true);
+  //   try {
+  //     // 1. Check Backend if number is used
+  //     // const check = await fetch('/api/auth/check-availability', {
+  //     //   method: 'POST',
+  //     //   headers: { 'Content-Type': 'application/json' },
+  //     //   body: JSON.stringify({ mobile: fullNumber })
+  //     // });
+  //     // const checkData = await check.json();
+  //     // if (!check.ok) throw new Error(checkData.message);
+
+  //     // 2. If free, send Firebase OTP
+  //     await sendFirebaseOtp(fullNumber);
+  //     setIsOtpSent(true);
+  //     setCountdown(180); // Start 3-minute timer
+  //   } catch (err) {
+  //     setError({ mobile: err.message });
+  //   } finally {
+  //     setIsLoadingss(false);
+  //   }
+  // };
+  const handleSendOtp = async () => {
+    setError({});
+    const fullNumber = `${countryCode}${formData.mobile}`;
+    setIsLoadingss(true);
+
+    // Step 1: Check if mobile is already registered
+    try {
+      const availabilityRes = await checkMobileAvailability(fullNumber.replace("+", ""));
+      // Handle both error throws and 200 responses with error messages
+      const resMessage = availabilityRes?.message || availabilityRes?.error || "";
+      if (availabilityRes?.success === false || resMessage.toLowerCase().includes("already") || resMessage.toLowerCase().includes("registered")) {
+        setError({ mobile: resMessage || "This mobile number is already registered. Please log in instead." });
+        setIsLoadingss(false);
+        return;
+      }
+    } catch (err) {
+      const message = err?.body?.message || err?.body?.error || err?.message || "This mobile number is already registered. Please log in instead.";
+      setError({ mobile: message });
+      setIsLoadingss(false);
+      return; // Block everything — don't send OTP, keep field editable
+    }
+
+    // Step 2: Send OTP only if number is available
+    try {
+      await sendFirebaseOtp(fullNumber);
+      setIsOtpSent(true);
+      setCountdown(180);
+    } catch (err) {
+      setError({ mobile: err.message || "Failed to send OTP. Please try again." });
+    } finally {
+      setIsLoadingss(false);
+    }
+  };
+  const handleResendOtp = async () => {
+    if (countdown > 0) return;
+    try {
+      await sendFirebaseOtp(`${countryCode}${formData.mobile}`);
+      setCountdown(180);
+      setFormData(prev => ({ ...prev, otp: new Array(6).fill("") }));
+    } catch (err) {
+      setError({ otp: "Resend failed. Try again." });
+    }
+  };
+  const handleVerifyOtp = async () => {
+    const otpCode = formData.otp.join("");
+    try {
+      const idToken = await verifyFirebaseOtp(otpCode);
+      setFirebaseIdToken(idToken);
+      setIsMobileVerified(true);
+    } catch (err) {
+      setError({ otp: "Invalid code" });
+    }
+  };
+
   return (
     <>
       {/* ============================================================
@@ -437,7 +572,10 @@ const SignUp = () => {
 
                 setIsTurnstileLoading(true);
                 const widgetId = window.turnstile.render(turnstileRef.current, {
-                  sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+                  sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || (() => {
+                    console.warn("⚠️ [Turnstile] NEXT_PUBLIC_TURNSTILE_SITE_KEY is not set. Please add it to your .env file.");
+                    return '1x00000000000000000000AA'; // Test key - replace with production key
+                  })(),
                   callback: (token) => {
                     setTurnstileToken(token);
                     setIsTurnstileLoading(false);
@@ -455,6 +593,7 @@ const SignUp = () => {
                   },
                   theme: 'dark',
                   size: 'normal',
+
                 });
                 turnstileWidgetId.current = widgetId;
 
@@ -608,40 +747,31 @@ const SignUp = () => {
                   )}
                 </div>
 
+                {/* MOBILE INPUT SECTION */}
                 <div className="flex flex-col">
                   <label className="[font-family:'Poppins',Helvetica] font-medium text-neutral-400 text-[14.3px] tracking-[0] mb-[1px] leading-[normal]">
                     Mobile Number <span className="text-red-400">*</span>
                   </label>
                   <div className="relative w-[314px] h-[55px] rounded-[12px] bg-white/10 backdrop-blur-lg border border-white/20 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 transition-colors">
-                    <Image
-                      className="absolute w-[17px] h-[17px] top-5 left-5"
-                      alt="Phone icon"
-                      src="https://c.animaapp.com/bkGH9LUL/img/vector-2.svg"
-                      width={17}
-                      height={17}
-                    />
+                    <Image className="absolute w-[17px] h-[17px] top-5 left-5" alt="Phone icon" src="https://c.animaapp.com/bkGH9LUL/img/vector-2.svg" width={17} height={17} />
                     <select
                       value={countryCode}
                       onChange={(e) => setCountryCode(e.target.value)}
                       className="absolute top-7 -translate-y-1/2 left-[50px] appearance-none [font-family:'Poppins',Helvetica] font-medium text-[#d3d3d3] text-[14.3px] bg-transparent border-none outline-none pr-2 disabled:opacity-50"
                       disabled={isOtpSent || isMobileVerified}
-                      aria-label="Country code"
                     >
                       <option value="+91" className="bg-[#272052] text-[#d3d3d3]">+91</option>
                       <option value="+1" className="bg-[#272052] text-[#d3d3d3]">+1</option>
-                      <option value="+44" className="bg-[#272052] text-[#d3d3d3]">+44</option>
-                      <option value="+61" className="bg-[#272052] text-[#d3d3d3]">+61</option>
                     </select>
                     <input
                       type="tel"
                       value={formData.mobile}
                       onChange={(e) => handleInputChange("mobile", e.target.value.replace(/\D/g, ''))}
-                      maxLength={10}
+                      maxLength={15}
                       className="absolute top-[17px] left-[87px] [font-family:'Poppins',Helvetica] font-medium text-[#d3d3d3] text-[14.3px] tracking-[0] leading-[normal] bg-transparent border-none outline-none w-[240px] disabled:opacity-50"
                       placeholder="Enter your mobile number"
                       required
                       disabled={isOtpSent || isMobileVerified}
-                      aria-label="Mobile number"
                     />
                     {!isOtpSent && !isMobileVerified && formData.mobile.length > 0 && (
                       <button
@@ -657,24 +787,19 @@ const SignUp = () => {
                       <div className="absolute right-4 top-1/2 -translate-y-1/2 text-green-400 text-sm font-semibold flex items-center">✓ Verified</div>
                     )}
                   </div>
-                  {error.mobile && (
-                    <p className="text-red-400 text-xs mt-1 ml-2 max-w-[314px] break-words">
-                      {error.mobile}
-                    </p>
-                  )}
+                  {error.mobile && <p className="text-red-400 text-xs mt-1 ml-2 max-w-[314px] break-words">{error.mobile}</p>}
+                  {/* reCAPTCHA — inside mobile field wrapper so it doesn't create extra gap */}
+                  <div id="recaptcha-container" className={`flex justify-center ${isOtpSent || isMobileVerified ? 'hidden' : 'mt-1 '}`}></div>
                 </div>
 
-
+                {/* OTP SECTION */}
                 {isOtpSent && !isMobileVerified && (
                   <div className="w-full flex flex-col items-center justify-center ">
-                    {/* Main Title */}
-                    <h3 className="[font-family:'Poppins',Helvetica] mb-1  ml-4 font-medium text-[#A4A4A4] text-[14.3px] tracking-[0]  leading-[normal]">
-
+                    <h3 className="[font-family:'Poppins',Helvetica] mb-1 ml-4 font-medium text-[#A4A4A4] text-[14.3px] tracking-[0] leading-[normal]">
                       Verify OTP sent to your mobile number
                     </h3>
 
-                    {/* OTP Input Boxes with Glassmorphism Effect */}
-                    <div className="flex justify-center gap-3 pt-2">
+                    <div className="flex justify-center gap-2 pt-2">
                       {formData.otp.map((data, index) => (
                         <input
                           key={index}
@@ -685,41 +810,33 @@ const SignUp = () => {
                           onKeyDown={e => handleOtpKeyDown(e, index)}
                           onFocus={e => e.target.select()}
                           ref={el => otpInputs.current[index] = el}
-                          disabled={isMobileVerified}
-                          className={`w-[65px] h-[55px] text-center  bg-white/10 backdrop-blur-lg  border-white/20 text-2xl font-semibold text-white  rounded-[8px] border ${error.otp ? 'border-red-500' : 'border-gray-600'} focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors disabled:opacity-50`}
-                          aria-label={`OTP Digit ${index + 1}`}
+                          className={`w-[45px] h-[55px] text-center bg-white/10 backdrop-blur-lg border-white/20 text-2xl font-semibold text-white rounded-[8px] border ${error.otp ? 'border-red-500' : 'border-gray-600'} focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors`}
+                        // Note: Reduced width to 45px slightly to fit 6 boxes comfortably
                         />
                       ))}
                     </div>
                     {error.otp && <p className="text-red-400 text-xs mt-1 text-center max-w-[314px] mx-auto break-words px-2">{error.otp}</p>}
 
-
-                    {/* Layout for Timer and Resend Button, matching the Figma design */}
                     <div className="w-[315px] flex justify-between items-center mt-1">
                       <p className="font-medium text-[#FFFFFF] text-[14px] mt-2 ml-4">
-                        {/* We format the countdown timer to look like the design */}
-                        {`00:${countdown.toString().padStart(2, '0')} sec remaining`}
+                        {`${formatTime(countdown)} remaining`}
                       </p>
                       <button
                         type="button"
                         onClick={handleResendOtp}
                         disabled={countdown > 0 || isResending}
-                        className=" mt-2 mr-4
-           w-[96px] h-[32px] rounded-[4px] border-1 border-[#9EADF7] 
-          text-[#9EADF7] text-[13px] font-semibold
-          disabled:cursor-not-allowed
-        "
+                        className="mt-2 mr-4 w-[96px] h-[32px] rounded-[4px] border border-[#9EADF7] text-[#9EADF7] text-[13px] font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
                       >
                         {isResending ? 'Sending...' : 'Resend OTP'}
                       </button>
                     </div>
-                    {/* Primary "Verify" Button */}
+
                     <div className="w-[180px] flex items-center justify-center pt-4">
                       <button
                         type="button"
                         onClick={handleVerifyOtp}
-                        disabled={isLoadings || formData.otp.join('').length < 4}
-                        className="w-full h-12 rounded-xl  bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] text-white  text-lg font-semibold shadow-md disabled:opacity-50 transition-opacity"
+                        disabled={isLoadings || formData.otp.join('').length < 6}
+                        className="w-full h-12 rounded-xl bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] text-white text-lg font-semibold shadow-md disabled:opacity-50 transition-opacity"
                       >
                         {isLoadings ? 'Verifying...' : 'Verify'}
                       </button>

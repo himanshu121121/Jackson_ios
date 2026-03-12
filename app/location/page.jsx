@@ -1,18 +1,32 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
-import { updateLocation } from "@/lib/api";
+import { updateLocation, updateProfile } from "@/lib/api";
 import { getCityAndCountry } from "@/lib/locationUtils";
 import { Geolocation } from '@capacitor/geolocation';
+import { Capacitor } from "@capacitor/core";
+import { App } from "@capacitor/app";
 
 export default function LocationPage() {
   const [isLoading, setIsLoading] = useState(false);
+
+  // Block Android hardware back button — user must grant or skip location to proceed
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let listenerHandle;
+    App.addListener("backButton", () => {
+      // Do nothing — back is blocked on Location screen
+    }).then((handle) => {
+      listenerHandle = handle;
+    });
+    return () => { listenerHandle?.remove(); };
+  }, []);
   const [error, setError] = useState(null);
   const [loadingStep, setLoadingStep] = useState("");
   const router = useRouter();
   const [isSkipping, setIsSkipping] = useState(false);
-  const { user, token } = useAuth();
+  const { user, token, updateUserInContext } = useAuth();
   const [showSkipWarning, setShowSkipWarning] = useState(false);
   // Main location handler with Android optimization
   const handleContinue = async () => {
@@ -80,9 +94,9 @@ export default function LocationPage() {
         try {
           // Try CORS-friendly IP services
           const ipServices = [
-            { url: 'https://jsonip.com', parser: (data) => ({ ip: data.ip, isp: "Unknown" }) },
             { url: 'https://ipapi.co/json/', parser: (data) => ({ ip: data.ip, isp: data.org || "Unknown" }) },
-            { url: 'https://ipinfo.io/json', parser: (data) => ({ ip: data.ip, isp: data.org || "Unknown" }) }
+            { url: 'https://ipinfo.io/json', parser: (data) => ({ ip: data.ip, isp: data.org || "Unknown" }) },
+            { url: 'https://jsonip.com', parser: (data) => ({ ip: data.ip, isp: "Unknown" }) }
           ];
 
           for (const service of ipServices) {
@@ -105,6 +119,7 @@ export default function LocationPage() {
                 break;
               }
             } catch (serviceError) {
+              console.error(`[Location] IP service ${service.url} failed:`, serviceError);
               continue; // Try next service
             }
           }
@@ -132,6 +147,23 @@ export default function LocationPage() {
         // Send to backend
         setLoadingStep("Saving location data...");
         await updateLocation(locationData, token);
+
+        // Update location on user profile
+        const locationUpdate = {
+          location: {
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            country: locationData.country,
+            city: locationData.city,
+          },
+        };
+        updateProfile(locationUpdate, token).catch(() => { });
+
+        // Update user in context immediately
+        if (user) {
+          updateUserInContext({ ...user, ...locationUpdate });
+        }
+
         localStorage.setItem("locationCompleted", "true");
         router.push("/face-verification");
 
@@ -301,13 +333,13 @@ export default function LocationPage() {
                 </span>
               </button>
 
-              <button
+              {/* <button
                 onClick={handleSkip}
                 disabled={isLoading || isSkipping}
                 className="w-full py-3 [font-family:'Poppins',Helvetica] font-medium text-[#FFFFFF] text-sm text-center hover:text-white transition-colors duration-200 disabled:opacity-50"
               >
                 {isSkipping ? "Updating..." : "Skip for now (Jackson won't work)"}
-              </button>
+              </button> */}
             </div>
           ) : (
             <div className="w-full max-w-sm mx-auto">

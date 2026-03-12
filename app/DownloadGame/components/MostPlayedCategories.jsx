@@ -5,117 +5,102 @@ import { useSelector, useDispatch } from "react-redux";
 import { useRouter } from "next/navigation";
 import { fetchMostPlayedScreenGames } from "@/lib/redux/slice/gameSlice";
 import { useAuth } from "@/contexts/AuthContext";
+import { getUserFromLocalStorage } from "@/lib/utils";
 import GameItemCard from "./GameItemCard";
 import WatchAdCard from "./WatchAdCard";
 
+const CACHE_STALE_MS = 5 * 60 * 1000;
+const FOCUS_REFRESH_STALE_MS = 2 * 60 * 1000;
+
 export const MostPlayedCategories = ({ searchQuery = "", showSearch = false }) => {
-    // Redux state management
     const dispatch = useDispatch();
     const router = useRouter();
     const { token } = useAuth();
 
-    // Get data from Redux store - using dedicated Most Played Screen state
-    const { mostPlayedScreenGames, mostPlayedScreenStatus, mostPlayedScreenError } = useSelector((state) => state.games);
-    const { details: userProfile } = useSelector((state) => state.profile);
+    const { mostPlayedScreenGames, mostPlayedScreenStatus, mostPlayedScreenError, mostPlayedScreenCacheTimestamp } = useSelector((state) => state.games);
 
-    // Fetch games from API for "Most Played Screen" section
+    // One fetch only on mount — same pattern as MostPlayedGames / GameCard.
+    // Empty deps [] ensures this runs exactly once; guards prevent redundant API calls.
     React.useEffect(() => {
-        if (!userProfile) return;
-
-
-        // Always dispatch - stale-while-revalidate will handle cache logic automatically
-        // Pass user object directly - API will extract age and gender dynamically
+        const user = typeof window !== "undefined" ? getUserFromLocalStorage() : null;
+        const hasFreshCache = mostPlayedScreenGames?.length && mostPlayedScreenCacheTimestamp && (Date.now() - mostPlayedScreenCacheTimestamp < CACHE_STALE_MS);
+        if (hasFreshCache || mostPlayedScreenStatus === "loading" || mostPlayedScreenStatus === "failed") return;
         dispatch(fetchMostPlayedScreenGames({
-            user: userProfile,
+            user: user || null,
             page: 1,
             limit: 50
         }));
-    }, [dispatch, userProfile]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Refresh games in background after showing cached data (to get admin updates)
+    // Return to app (focus): refetch only if cache older than 2 min. User from localStorage.
     React.useEffect(() => {
-        if (!userProfile) return;
-
-        const refreshTimer = setTimeout(() => {
+        const handleRefreshIfStale = () => {
+            const state = require("@/lib/redux/store").store.getState();
+            const ts = state.games.mostPlayedScreenCacheTimestamp;
+            const isStale = !ts || Date.now() - ts > FOCUS_REFRESH_STALE_MS;
+            if (!isStale) return;
+            const user = typeof window !== "undefined" ? getUserFromLocalStorage() : null;
             dispatch(fetchMostPlayedScreenGames({
-                user: userProfile,
+                user: user || null,
                 page: 1,
                 limit: 50,
                 force: true,
                 background: true
             }));
-        }, 100);
+        };
+        const handleFocus = () => handleRefreshIfStale();
+        const handleVisibility = () => {
+            if (!document.hidden) handleRefreshIfStale();
+        };
+        window.addEventListener("focus", handleFocus);
+        document.addEventListener("visibilitychange", handleVisibility);
+        return () => {
+            window.removeEventListener("focus", handleFocus);
+            document.removeEventListener("visibilitychange", handleVisibility);
+        };
+    }, [dispatch]);
 
-        return () => clearTimeout(refreshTimer);
-    }, [dispatch, userProfile]);
 
 
 
-
-    // Process games from API into the same format - using besitosRawData (same flow as other components)
+    // Process games from API into the same format - using normalizer for both besitos and bitlab
     const processGames = (games) => {
+        const { normalizeGameImages, normalizeGameTitle, normalizeGameCategory, normalizeGameAmount, normalizeGameGoals, normalizeGameUrl } = require('@/lib/gameDataNormalizer');
+
         return games.map((game, index) => {
-            // Use besitosRawData if available, otherwise fallback to existing structure
-            const rawData = game.besitosRawData || {};
+            // Normalize game data for both besitos and bitlab
+            const { normalizeGameImages, normalizeGameTitle, normalizeGameCategory, normalizeGameAmount, normalizeGameUrl, getTotalPromisedPoints } = require('@/lib/gameDataNormalizer');
+            const images = normalizeGameImages(game);
+            const title = normalizeGameTitle(game);
+            const category = normalizeGameCategory(game);
+            const amount = normalizeGameAmount(game);
+            const url = normalizeGameUrl(game);
 
             // Clean game name - remove platform suffix after "-"
-            const cleanGameName = (rawData.title || game.details?.name || game.name || game.title || "Game").split(' - ')[0].trim();
+            const cleanGameName = title.split(' - ')[0].trim();
 
-            // Get category from besitosRawData first, then fallback
-            const category = rawData.categories?.[0]?.name || game.details?.category || "Game";
-
-            // Calculate coins - use rewards.coins first (from API), then fallback to amount
-            // Priority: rewards.coins > besitosRawData.amount > game.amount
-            const coinAmount = game.rewards?.coins || rawData.amount || game.amount || 0;
-            const amount = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(coinAmount.replace('$', '')) || 0 : 0);
-
-            // Calculate total XP with progressive multiplier (same as game details page and other components)
-            // Task 1: baseXP × multiplier^0
-            // Task 2: baseXP × multiplier^1
-            // Task 3: baseXP × multiplier^2
-            // ...
-            // Total = sum of all task XPs
-            let totalXP = 0;
-            if (game.rewards?.xp) {
-                // Use rewards.xp if available
-                totalXP = game.rewards.xp;
-            } else {
-                // Calculate from xpRewardConfig with progressive multiplier
-                const xpConfig = game.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-                const baseXP = xpConfig.baseXP || 1;
-                const multiplier = xpConfig.multiplier || 1;
-
-                // Get total number of tasks/goals
-                const goals = rawData.goals || game.goals || [];
-                const totalTasks = goals.length || 0;
-
-                // Calculate total XP: sum of baseXP × multiplier^taskIndex for all tasks
-                // This is a geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1) when multiplier ≠ 1
-                // When multiplier = 1, it's just baseXP × totalTasks
-                if (multiplier === 1) {
-                    // Simple case: all tasks have same XP
-                    totalXP = baseXP * totalTasks;
-                } else if (totalTasks > 0) {
-                    // Geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1)
-                    totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-                }
-            }
+            // Prefer API rewards.coins / rewards.gold everywhere (map on every UI section)
+            const coinAmount = game.rewards?.coins ?? game.rewards?.gold ?? amount ?? 0;
+            const raw = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(coinAmount.replace('$', '')) || 0 : 0);
+            const amountValue = Number.isFinite(raw) ? (raw === Math.round(raw) ? raw : Math.round(raw * 100) / 100) : 0;
+            const { totalXP } = getTotalPromisedPoints(game);
+            const xpValue = Number.isFinite(totalXP) ? Math.floor(totalXP) : 0;
 
             return {
                 id: game._id || game.id || game.gameId,
                 name: cleanGameName,
                 genre: category,
-                // Use besitosRawData images first (highest priority)
-                image: rawData.square_image || rawData.image || game.images?.banner || game.images?.large_image || game.details?.square_image || game.details?.image || "/placeholder-game.png",
-                overlayImage: rawData.image || rawData.square_image || game.details?.image || game.details?.square_image,
-                amount: amount, // Coins without $ sign
-                xp: Math.floor(totalXP), // Total XP calculated with progressive multiplier
+                // Use normalized images
+                image: images.square_image || images.icon || game.images?.banner || game.images?.large_image || game.details?.square_image || game.details?.image || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png",
+                overlayImage: images.icon || images.square_image || game.details?.image || game.details?.square_image,
+                amount: amountValue, // Coins without $ sign
+                xp: xpValue, // Total XP from tasks (getTotalPromisedPoints)
                 coinIcon: "/dollor.png",
                 picIcon: "/xp.svg",
-                // Use besitosRawData large_image for background
-                backgroundImage: rawData.large_image || rawData.image || game.images?.banner || game.details?.large_image || game.details?.image,
-                // Use besitosRawData url for download
-                downloadUrl: rawData.url || game.details?.downloadUrl,
+                // Use normalized images for background
+                backgroundImage: images.large_image || images.banner || images.icon || game.images?.banner || game.details?.large_image || game.details?.image,
+                // Use normalized url for download
+                downloadUrl: url || game.details?.downloadUrl,
                 // Store full game data including besitosRawData
                 fullData: game,
             };
@@ -171,9 +156,8 @@ export const MostPlayedCategories = ({ searchQuery = "", showSearch = false }) =
             // Failed to store game data
         }
 
-        // Use 'id' field first (as expected by API), fallback to '_id' or 'gameId'
-        // Use gameId query parameter (not id) to match other sections
-        const gameId = fullGame.id || fullGame._id || fullGame.gameId;
+        // Use provider gameId (BitLabs/Besitos) for get-game-by-id API; fallback to id/_id
+        const gameId = fullGame.gameId || fullGame.details?.id || fullGame.id || fullGame._id;
         router.push(`/gamedetails?gameId=${gameId}&source=mostPlayedScreen`);
     }, [router, dispatch]);
 
@@ -221,7 +205,7 @@ export const MostPlayedCategories = ({ searchQuery = "", showSearch = false }) =
                             <button
                                 onClick={() => {
                                     dispatch(fetchMostPlayedScreenGames({
-                                        user: userProfile,
+                                        user: getUserFromLocalStorage() || null,
                                         page: 1,
                                         limit: 50
                                     }));
@@ -272,7 +256,7 @@ export const MostPlayedCategories = ({ searchQuery = "", showSearch = false }) =
                             <button
                                 onClick={() => {
                                     dispatch(fetchMostPlayedScreenGames({
-                                        user: userProfile,
+                                        user: getUserFromLocalStorage() || null,
                                         page: 1,
                                         limit: 50
                                     }));
@@ -320,7 +304,7 @@ export const MostPlayedCategories = ({ searchQuery = "", showSearch = false }) =
                             <button
                                 onClick={() => {
                                     dispatch(fetchMostPlayedScreenGames({
-                                        user: userProfile,
+                                        user: getUserFromLocalStorage() || null,
                                         page: 1,
                                         limit: 50
                                     }));

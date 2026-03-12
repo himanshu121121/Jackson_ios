@@ -2,7 +2,7 @@ import React from 'react'
 import Image from 'next/image'
 
 const Vip = ({ vipStatus, handleVipUpgrade }) => {
-    const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier !== "Free";
+    const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier.toLowerCase() !== "free";
 
     return (
         !isVipActive ? (

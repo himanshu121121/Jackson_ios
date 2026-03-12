@@ -263,12 +263,13 @@ export const EditProfile = () => {
         <div className="absolute w-[132px] h-[132px] top-[140px] left-1/2 transform -translate-x-1/2">
           <div className="relative w-full h-full">
             <img
-              src={avatarPreview}
+              src={avatarPreview || "/profile.png"}
               alt="Profile avatar preview"
               width={132}
               height={132}
               className="w-[132px] h-[132px] object-cover rounded-full"
               crossOrigin="anonymous"
+              onError={(e) => { e.target.src = "/profile.png"; }}
             />
             <div className="absolute w-[45px] h-[45px] bottom-0 right-0">
               <div className="relative w-[43px] h-[45px]">

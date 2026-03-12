@@ -12,7 +12,7 @@ const VipBanner = () => {
 
     // OPTIMIZED: Memoize VIP status calculation
     const vipData = useMemo(() => {
-        const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier !== "Free";
+        const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier.toLowerCase() !== "free";
         const currentTier = vipStatus?.data?.currentTier;
 
         return {
@@ -23,17 +23,19 @@ const VipBanner = () => {
 
     // OPTIMIZED: Memoize event handler
     const handleVipClick = useCallback(() => {
+        if (typeof window !== "undefined") sessionStorage.setItem("buySubscriptionFrom", "/homepage");
         router.push("/BuySubscription");
     }, [router]);
 
     // OPTIMIZED: Memoize VIP upgrade handler
     const handleVipUpgrade = useCallback(() => {
+        if (typeof window !== "undefined") sessionStorage.setItem("buySubscriptionFrom", "/homepage");
         router.push("/BuySubscription");
     }, [router]);
 
     return (
         !vipData.isVipActive ? (
-            <section className="relative w-full max-w-[335px] h-[127px] mx-auto">
+            <section className="relative w-full max-w-[335px] h-[127px]   mx-auto mb-4">
                 <Image
                     width={334}
                     height={127}
@@ -98,3 +100,4 @@ const VipBanner = () => {
 };
 
 export default VipBanner;
+``

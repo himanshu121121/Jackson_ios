@@ -10,10 +10,10 @@ const HeaderSection = () => {
     const profile = useSelector((state) => state.profile.details);
     const walletScreen = useSelector((state) => state.walletTransactions.walletScreen);
 
-    // OPTIMIZED: Memoize expensive calculations
+    // Coin balance from profile API (https://rewardsapi.hireagent.co/api/profile) -> wallet.balance, fallback to wallet screen
     const headerData = useMemo(() => {
         const firstName = profile?.firstName || "Player";
-        const balance = walletScreen?.wallet?.balance || 0;
+        const balance = profile?.wallet?.balance ?? profile?.data?.wallet?.balance ?? walletScreen?.wallet?.balance ?? 0;
 
         return {
             firstName,

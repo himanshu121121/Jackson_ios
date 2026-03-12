@@ -10,7 +10,7 @@ export const OptInModal = ({
     isClaimed = false
 }) => {
     // Calculate progress percentages
-    const maxCoins = game?.amount || 0;
+    const maxCoins = Number(game?.rewards?.coins ?? game?.rewards?.gold ?? game?.amount ?? 0) || 0;
     const coinProgressPercentage = maxCoins > 0 ? (sessionData.sessionCoins / maxCoins) * 100 : 0;
     const maxXP = maxCoins > 0 ? Math.floor(maxCoins * 0.1) : 0;
 
@@ -76,8 +76,8 @@ export const OptInModal = ({
 
     // Use portal to render modal at document body level
     const modalContent = (
-        <div
-            className="fixed inset-0 z-[9999] flex items-center justify-center p-2 animate-fade-in"
+<div
+            className="fixed inset-0 z-[999999] flex items-center justify-center p-2 animate-fade-in"
             onClick={handleModalClose}
         >
             {/* Backdrop - Separate layer */}
@@ -88,7 +88,7 @@ export const OptInModal = ({
 
             {/* Modal Container - Centered like 30-day streak modal */}
             <div
-                className="relative w-full max-w-[95vw] bg-black rounded-[20px] border border-solid border-[#4A4A4A] overflow-hidden shadow-2xl max-h-[95vh] overflow-y-auto scrollbar-hide"
+                className="relative w-full max-w-[95vw] bg-black rounded-[20px] border border-solid border-[#4A4A4A] overflow-hidden shadow-2xl max-h-[95vh] overflow-y-auto scrollbar-hide absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"
                 onClick={(e) => e.stopPropagation()}
                 style={{
                     isolation: 'isolate',

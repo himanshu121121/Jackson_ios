@@ -36,11 +36,7 @@ export const Header = () => {
                         Achieve Your Goal
                     </h1>
                 </div>
-
             </header>
-            <p className=' px-2 text-white text-[14px] font-light'>Follow the steps to unlock your rewards/ Loyalty plan</p>
-
-
         </>
     )
 }

@@ -1,20 +1,44 @@
 "use client";
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import Image from 'next/image'
 import { useSelector, useDispatch } from 'react-redux'
-import { fetchAccountOverview, claimAccountReward, updateAccountProgress } from '@/lib/redux/slice/accountOverviewSlice'
+import { fetchAccountOverview, claimAccountReward, updateAccountProgress, loadAccountOverviewFromCache, accountOverviewCacheKey } from '@/lib/redux/slice/accountOverviewSlice'
 import ProgressSection from './ProgressSection'
 
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 const AccountOverviewCard = ({ userStats = null, className = "" }) => {
-    // Get data from Redux store
     const dispatch = useDispatch();
     const { data: accountData, status, error } = useSelector((state) => state.accountOverview);
-    const userEarnings = useSelector((state) => state.games.userEarnings);
+    const [isClient, setIsClient] = useState(false);
+
+    // Load from localStorage cache immediately so we show real data without blocking (like GameListSection)
+    useEffect(() => {
+        setIsClient(true);
+    }, []);
+    useEffect(() => {
+        if (!isClient || typeof window === 'undefined') return;
+        const token = localStorage.getItem('authToken') || localStorage.getItem('x-auth-token');
+        if (!token) return;
+        try {
+            const raw = localStorage.getItem(accountOverviewCacheKey);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                const cacheAge = Date.now() - (parsed.timestamp || 0);
+                if (parsed.data && cacheAge < CACHE_TTL * 2) {
+                    dispatch(loadAccountOverviewFromCache({
+                        data: parsed.data,
+                        timestamp: parsed.timestamp,
+                    }));
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+    }, [isClient, dispatch]);
 
     // Loading and error states from Redux
-    // Only show loading if we have NO cached data at all (stale-while-revalidate pattern)
-    const hasCachedData = accountData && Object.keys(accountData).length > 0 && accountData.totalEarnings;
-    const isLoading = status === 'loading' && !hasCachedData;
+    const isLoading = status === 'loading';
     const hasError = status === 'failed';
 
     /**
@@ -41,39 +65,6 @@ const AccountOverviewCard = ({ userStats = null, className = "" }) => {
     const coinsTarget = accountData?.progress?.coinsEarned?.target || 0;
     const challengesCompleted = accountData?.progress?.challengesCompleted?.current || 0;
     const challengesTarget = accountData?.progress?.challengesCompleted?.target || 0;
-
-    // Fetch data on mount if not already loaded (stale-while-revalidate pattern)
-    // Shows cached data immediately, fetches fresh data in background
-    useEffect(() => {
-        const token = localStorage.getItem("authToken") || localStorage.getItem("x-auth-token");
-        if (!token) return;
-
-        // Only fetch if status is idle (not loaded yet)
-        // If data exists, stale-while-revalidate will handle background refresh automatically
-        if (status === 'idle') {
-            dispatch(fetchAccountOverview());
-        } else if (hasCachedData) {
-            // If we have cached data, trigger background refresh
-            // This ensures fresh data is fetched without blocking UI
-            setTimeout(() => {
-                dispatch(fetchAccountOverview({ background: true }));
-            }, 100);
-        }
-    }, [status, hasCachedData, dispatch]);
-
-    // Auto-refresh account overview when coins/XP are updated (background, non-blocking)
-    useEffect(() => {
-        const token = localStorage.getItem("authToken") || localStorage.getItem("x-auth-token");
-        if (!token || status === 'loading') return;
-
-        // Refresh in background when balance changes (from rewards, games, etc.)
-        // Use setTimeout with debounce to batch multiple updates and make it non-blocking
-        const refreshTimer = setTimeout(() => {
-            dispatch(fetchAccountOverview({ background: true, force: true }));
-        }, 1500); // 1.5 second delay to batch multiple coin updates
-
-        return () => clearTimeout(refreshTimer);
-    }, [userEarnings?.balance, userEarnings?.historyAmount, dispatch, status]);
 
     if (isLoading) {
         return (
@@ -122,9 +113,6 @@ const AccountOverviewCard = ({ userStats = null, className = "" }) => {
                                 src="https://c.animaapp.com/3mn7waJw/img/group-4@2x.png"
                                 width={55}
                                 height={55}
-                                loading="eager"
-                                decoding="async"
-                                priority
                             />
                         </div>
 
@@ -151,7 +139,7 @@ const AccountOverviewCard = ({ userStats = null, className = "" }) => {
                         />
 
                         <ProgressSection
-                            title={`${challengesCompleted}/${challengesTarget} Challenges Finished (Daily)`}
+                            title={`${challengesCompleted}/${challengesTarget} Challenges Finished `}
                             progress={calculateProgressPercentage(challengesCompleted, challengesTarget)}
                             mainValue={`${accountData?.rewardBadges?.[2]?.reward?.coins || 0}`}
                             bonusValue={`${accountData?.rewardBadges?.[2]?.reward?.xp || 0}`}
@@ -182,9 +170,6 @@ const AccountOverviewCard = ({ userStats = null, className = "" }) => {
                                             src="https://c.animaapp.com/3mn7waJw/img/image-3937-4@2x.png"
                                             width={20}
                                             height={20}
-                                            loading="eager"
-                                            decoding="async"
-                                            priority
                                         />
                                     </div>
                                 </div>
@@ -201,9 +186,6 @@ const AccountOverviewCard = ({ userStats = null, className = "" }) => {
                                             src="https://c.animaapp.com/3mn7waJw/img/pic-7.svg"
                                             width={18}
                                             height={18}
-                                            loading="eager"
-                                            decoding="async"
-                                            priority
                                         />
                                     </div>
                                 </div>

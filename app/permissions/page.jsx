@@ -1,15 +1,45 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from '@/contexts/AuthContext';
-
-import { acceptDisclosure } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
+import useOnboardingStore from "@/stores/useOnboardingStore";
+import { acceptDisclosure, submitOnboarding, updateProfile } from "@/lib/api";
+import { Capacitor } from "@capacitor/core";
+import { App } from "@capacitor/app";
 
 export default function PermissionsPage() {
   const router = useRouter();
-  const { token } = useAuth();
+  const { token, user, isLoading, updateUserInContext } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
+
+  // Block Android hardware back button — user must tap Agree to proceed
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let listenerHandle;
+    App.addListener("backButton", () => {
+      // Do nothing — back is blocked on Prominent Disclosure
+    }).then((handle) => {
+      listenerHandle = handle;
+    });
+    return () => { listenerHandle?.remove(); };
+  }, []);
+
+  // Check for token in localStorage and redirect if missing
+  useEffect(() => {
+    // Wait for AuthContext to finish loading
+    if (isLoading) return;
+
+    // Check both AuthContext state and localStorage as fallback
+    const storedToken = localStorage.getItem("authToken");
+    const hasToken = token || storedToken;
+
+    if (!hasToken) {
+      console.error("No auth token found. Redirecting to login.");
+      router.replace("/login");
+      return;
+    }
+  }, [token, isLoading, router]);
 
   const permissionItems = [
     {
@@ -37,9 +67,12 @@ export default function PermissionsPage() {
   const handleAgree = async () => {
     if (isSubmitting) return;
 
-    if (!token) {
-      console.error("No auth token found. User must be logged in.");
+    const storedToken = localStorage.getItem("authToken");
+    const authToken = token || storedToken;
+
+    if (!authToken) {
       setError("Authentication error. Please log in again.");
+      router.replace("/login");
       return;
     }
 
@@ -47,17 +80,70 @@ export default function PermissionsPage() {
     setError(null);
 
     try {
-      await acceptDisclosure(token);
-      localStorage.setItem("permissionsAccepted", "true");
-      router.push("/location");
+      // 1. Submit all onboarding answers in one call (POST /api/onboarding/submit)
+      // User identified by auth token only; no mobile in body.
+      const onboardingState = useOnboardingStore.getState();
+      const payload = {
+        ...(onboardingState.primaryGoal != null && { primaryGoal: onboardingState.primaryGoal }),
+        ...(onboardingState.gender != null && { gender: onboardingState.gender }),
+        ...(onboardingState.ageRange != null && { ageRange: onboardingState.ageRange }),
+        ...(Array.isArray(onboardingState.gamePreferences) && onboardingState.gamePreferences.length > 0 && { gamePreferences: onboardingState.gamePreferences }),
+        ...(onboardingState.gameStyle != null && { gameStyle: onboardingState.gameStyle }),
+        ...(onboardingState.improvementArea != null && { improvementArea: onboardingState.improvementArea }),
+        ...(onboardingState.dailyEarningGoal != null && { dailyEarningGoal: Number(onboardingState.dailyEarningGoal) }),
+      };
 
+      await submitOnboarding(payload, authToken);
+
+      // 2. Mark onboarding complete and clear local onboarding data
+      localStorage.setItem("onboardingComplete", "true");
+      useOnboardingStore.getState().resetOnboarding();
+
+      // 3. Accept disclosure
+      await acceptDisclosure(authToken);
+
+      localStorage.setItem("permissionsAccepted", "true");
+
+      // 4. Update permissionStatus + age + gender on the profile
+      // /api/disclosure/accept does NOT update permissionStatus, so we do it explicitly
+      // NOTE: use onboardingState captured above — store was already reset at line 100
+      const profileUpdate = {
+        permissionStatus: true,
+        ...(onboardingState.ageRange != null && { age: onboardingState.ageRange }),
+        ...(onboardingState.gender != null && { gender: onboardingState.gender }),
+      };
+      updateProfile(profileUpdate, authToken).catch(() => { });
+
+      // Update user in context immediately so app reflects latest state
+      if (user) {
+        const updatedUser = { ...user, ...profileUpdate };
+        updateUserInContext(updatedUser);
+      }
+
+      router.push("/location");
     } catch (err) {
-      console.error("Failed to accept disclosure:", err);
-      setError(err.message || "An unexpected error occurred. Please try again.");
+      console.error("Onboarding submit or disclosure error:", err);
+      const message = err?.body?.message ?? err?.body?.error ?? err?.message ?? "Something went wrong. Please try again.";
+      setError(message);
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  // Show loading state while checking authentication
+  if (isLoading) {
+    return (
+      <div className="w-full min-h-screen bg-[#272052] flex items-center justify-center">
+        <div className="text-white">Loading...</div>
+      </div>
+    );
+  }
+
+  // Don't render if no token (will redirect in useEffect)
+  const storedToken = localStorage.getItem("authToken");
+  if (!token && !storedToken) {
+    return null;
+  }
 
   return (
     <div className="w-full min-h-screen bg-[#272052] flex items-center justify-center ">

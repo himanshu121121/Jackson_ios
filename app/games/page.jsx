@@ -25,7 +25,7 @@ export default function GamesPage() {
   return (
     <div className="flex justify-center ">
       <div
-        className="relative overflow-x-hidden w-full min-h-screen bg-black pb-[150px] mx-auto"
+        className="relative overflow-x-hidden w-full min-h-screen bg-black pb-48 mx-auto"
         data-model-id="289:1500"
       >
         {/* App version */}

@@ -115,7 +115,7 @@ export default function MyEarningCard({ token }) {
                             <div className="text-[#FFFFFF] text-[14px]">My Earnings</div>
                             <button
                                 onClick={handleWalletClick}
-                                className="flex items-center gap-2 min-w-0 hover:opacity-80 transition-opacity duration-200 cursor-pointer"
+                                className="flex items-center gap-1.5 min-w-0 hover:opacity-80 transition-opacity duration-200 cursor-pointer"
                                 type="button"
                                 aria-label="Go to Wallet"
                             >
@@ -123,18 +123,18 @@ export default function MyEarningCard({ token }) {
                                     {coinBalance}
                                 </div>
                                 <Image
-                                    width={23}
+                                    width={21}
                                     height={19}
                                     alt="Coin"
                                     src="/dollor.png"
-                                    className="flex-shrink-0"
+                                    className="flex-shrink-0 -ml-1"
                                     priority
                                     loading="eager"
                                 />
                             </button>
                         </div>
 
-                        <div className="absolute top-[39px]  mt-1 left-[103px] flex items-center ml-3 gap-2">
+                        <div className="absolute top-[39px] mt-1 left-[118px] flex ml-1 items-center gap-2">
                             <div className="font-semibold text-white text-xl">
                                 {xpCurrent}
                             </div>
@@ -145,6 +145,7 @@ export default function MyEarningCard({ token }) {
                                 src="/xp.svg"
                                 priority
                                 loading="eager"
+                                className="flex-shrink-0 -ml-1"
                             />
                         </div>
 

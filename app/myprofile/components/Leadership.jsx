@@ -1,99 +1,84 @@
-import React, { useMemo, useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import { useSelector, useDispatch } from 'react-redux'
 import { useRouter } from 'next/navigation'
-import { handleGameDownload } from '@/lib/gameDownloadUtils'
 import { fetchGamesBySection } from '@/lib/redux/slice/gameSlice'
-// Removed getAgeGroupFromProfile and getGenderFromProfile - now passing user object directly
+import { store } from '@/lib/redux/store'
+import { normalizeGameImages, normalizeGameTitle, normalizeGameAmount, getTotalPromisedPoints } from '@/lib/gameDataNormalizer'
+
+const EMPTY_ARRAY = [];
+
+const formatNumber = (num) => {
+    if (num === null || num === undefined) return "0";
+    const numValue = typeof num === 'string' ? parseFloat(num.replace(/,/g, '')) : num;
+    if (isNaN(numValue)) return "0";
+    return numValue.toLocaleString();
+};
 
 const Leadership = () => {
     const router = useRouter();
     const dispatch = useDispatch();
 
-    // Use new game discovery API for Leadership section
-    const gamesBySection = useSelector((state) => state.games.gamesBySection)
-    const gamesBySectionStatus = useSelector((state) => state.games.gamesBySectionStatus)
-    const { details: userProfile } = useSelector((state) => state.profile)
+    const sectionName = "Leadership";
+    const CACHE_STALE_MS = 5 * 60 * 1000;
+    const FOCUS_REFRESH_STALE_MS = 2 * 60 * 1000;
 
-    // STALE-WHILE-REVALIDATE: Always fetch - will use cache if available and fresh
+    // FIX: select only this section's data so re-renders only happen when "Leadership" changes,
+    // not every time Swipe / MostPlayed / Highest Earning etc. update their Redux state
+    const sectionGames = useSelector((state) => state.games.gamesBySection[sectionName] ?? EMPTY_ARRAY);
+    const sectionStatus = useSelector((state) => state.games.gamesBySectionStatus[sectionName] || "idle");
+    const sectionTimestamp = useSelector((state) => state.games.gamesBySectionTimestamp[sectionName]);
+    const { details: userProfile } = useSelector((state) => state.profile);
+    // Stable user ID avoids re-triggering the effect on every profile data refresh
+    const userId = userProfile?._id || userProfile?.id;
+    const userProfileRef = useRef(userProfile);
+    userProfileRef.current = userProfile;
+
+    // One discover call only on mount — same pattern as MostPlayedGames / GameCard.
+    // Empty deps [] ensures this runs exactly once; guards prevent redundant API calls.
     useEffect(() => {
-        // Always dispatch - stale-while-revalidate will handle cache logic automatically
-        // Pass user object directly - API will extract age and gender dynamically
-        // This ensures:
-        // 1. Shows cached data immediately if available (< 5 min old)
-        // 2. Refreshes in background if cache is stale or 80% expired
-        // 3. Fetches fresh if no cache exists
+        const hasFreshCache = sectionTimestamp != null && Date.now() - sectionTimestamp < CACHE_STALE_MS;
+        if (hasFreshCache || sectionStatus === "loading" || sectionStatus === "failed") return;
         dispatch(fetchGamesBySection({
-            uiSection: "Leadership",
-            user: userProfile,
+            uiSection: sectionName,
+            user: userProfileRef.current,
             page: 1,
             limit: 10
         }));
-    }, [dispatch, userProfile]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Refresh games in background after showing cached data (to get admin updates)
-    // Do this in background without blocking UI - show cached data immediately
+    // Return to app (focus): one discover call only if cache older than 2 min.
     useEffect(() => {
-        if (!userProfile) return;
-
-        // Use setTimeout to refresh in background after showing cached data
-        // This ensures smooth UX - cached data shows immediately, fresh data loads in background
-        const refreshTimer = setTimeout(() => {
+        const handleRefreshIfStale = () => {
+            const state = store.getState();
+            const ts = state.games.gamesBySectionTimestamp[sectionName];
+            const isStale = !ts || Date.now() - ts > FOCUS_REFRESH_STALE_MS;
+            if (!isStale) return;
+            const user = state.profile.details;
             dispatch(fetchGamesBySection({
-                uiSection: "Leadership",
-                user: userProfile,
+                uiSection: sectionName,
+                user: user || null,
                 page: 1,
                 limit: 10,
                 force: true,
                 background: true
             }));
-        }, 100); // Small delay to let cached data render first
+        };
 
-        return () => clearTimeout(refreshTimer);
-    }, [dispatch, userProfile]);
-
-    // Refresh games in background when app comes to foreground (admin might have updated)
-    useEffect(() => {
-        if (!userProfile) return;
-
-        const handleFocus = () => {
-            dispatch(fetchGamesBySection({
-                uiSection: "Leadership",
-                user: userProfile,
-                page: 1,
-                limit: 10,
-                force: true,
-                background: true
-            }));
+        const handleFocus = () => handleRefreshIfStale();
+        const handleVisibility = () => {
+            if (!document.hidden) handleRefreshIfStale();
         };
 
         window.addEventListener("focus", handleFocus);
-
-        const handleVisibilityChange = () => {
-            if (!document.hidden && userProfile) {
-                dispatch(fetchGamesBySection({
-                    uiSection: "Leadership",
-                    user: userProfile,
-                    page: 1,
-                    limit: 10,
-                    force: true,
-                    background: true
-                }));
-            }
-        };
-
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", handleVisibility);
 
         return () => {
             window.removeEventListener("focus", handleFocus);
-            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            document.removeEventListener("visibilitychange", handleVisibility);
         };
-    }, [dispatch, userProfile]);
+    }, [dispatch, sectionName]);
 
-    // Memoize the leadership games from the new API
-    const leadershipGames = useMemo(() => {
-        const allGames = gamesBySection?.["Leadership"] || [];
-        return allGames.slice(0, 2);
-    }, [gamesBySection]);
+    const leadershipGames = sectionGames.slice(0, 2);
 
     // Handle game click - navigate to game details
     const handleGameClick = (game) => {
@@ -107,22 +92,23 @@ const Leadership = () => {
             // Failed to store game data
         }
 
-        // Use 'id' field first (as expected by API), fallback to '_id'
-        const gameId = game.id || game._id || game.gameId;
+        // Use provider gameId (BitLabs/Besitos) for get-game-by-id API; fallback to id/_id
+        const gameId = game.gameId || game.details?.id || game.id || game._id;
         router.push(`/gamedetails?gameId=${gameId}&source=leadership`);
     };
 
-    // Show loading state if games are still loading
-    if (gamesBySectionStatus?.["Leadership"] === 'loading') {
+    // Show loading skeleton only when loading AND no cached data (show cache first when present)
+    const hasCachedData = leadershipGames.length > 0;
+    if (sectionStatus === "loading" && !hasCachedData) {
         return (
-            <section className="flex flex-col w-full max-w-[335px] items-start gap-2.5 mx-auto px-2 sm:px-0">
+            <section className="flex flex-col w-full max-w-[332px] items-start gap-2.5 mx-auto px-2 sm:px-0">
                 <h3 className="font-semibold text-white text-base w-full mb-2">Leadership</h3>
                 <div
                     className={`flex items-start sm:items-center gap-3 sm:gap-[15px] w-full overflow-x-auto pb-2 justify-center`}
                     style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
                 >
                     {[1, 2].map((i) => (
-                        <div key={i} className="relative flex-shrink-0 w-[160px] sm:w-40 h-auto min-h-[281px] animate-pulse">
+                        <div key={i} className="relative flex-shrink-0 w-[155px] sm:w-[155px] h-auto min-h-[274px] animate-pulse">
                             <div className="w-full h-[185px] bg-gray-700 rounded-[16px]"></div>
                             <div className="mt-3 space-y-2">
                                 <div className="w-24 h-4 bg-gray-700 rounded"></div>
@@ -155,59 +141,35 @@ const Leadership = () => {
         );
     }
     return (
-        <section className="flex flex-col w-full max-w-[335px] items-start gap-2.5 mx-auto px-2 sm:px-0">
+        <section className="flex flex-col w-full max-w-[330px] items-start gap-2.5 mx-auto px-2 sm:px-0">
             {/* JACK_58: Ensure heading is present and styled */}
             <h3 className="font-semibold text-white text-base w-full">Leadership</h3>
 
             <div
-                className={`flex items-start sm:items-center gap-3 sm:gap-[15px] w-full overflow-x-auto pb-2 ${leadershipGames.length === 1 ? 'justify-center' : leadershipGames.length === 2 ? 'justify-start sm:justify-center' : 'justify-start'
+                className={`flex items-start sm:items-center gap-3 sm:gap-[15px] w-full overflow-x-hidden pb-2 ${leadershipGames.length === 1 ? 'justify-center' : leadershipGames.length === 2 ? 'justify-start sm:justify-center' : 'justify-start'
                     }`}
-                style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
             >
                 {leadershipGames.map((game, index) => {
-                    // Use besitosRawData if available
-                    const rawData = game.besitosRawData || {};
-                    const displayImage = rawData.square_image || rawData.image || game.images?.icon || game.icon || game.square_image || game.image || '/placeholder-game.png';
-                    const displayTitle = rawData.title || game.details?.name || game.title || game.name || 'Game';
+                    const images = normalizeGameImages(game);
+                    const displayImage = images.square_image || images.icon || game.images?.icon || game.icon || game.square_image || game.image || 'https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png';
+                    const displayTitle = normalizeGameTitle(game);
 
-                    // Calculate coins and XP
-                    const coinAmount = game.rewards?.coins || rawData.amount || game.amount || 0;
-                    const coins = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(coinAmount.replace('$', '').replace(/,/g, '')) || 0 : 0);
-
-                    // Calculate total XP
-                    let totalXP = 0;
-                    if (game.rewards?.xp) {
-                        totalXP = game.rewards.xp;
-                    } else {
-                        const xpConfig = game.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-                        const baseXP = xpConfig.baseXP || 1;
-                        const multiplier = xpConfig.multiplier || 1;
-                        const goals = rawData.goals || game.goals || [];
-                        const totalTasks = goals.length || 0;
-
-                        if (multiplier === 1) {
-                            totalXP = baseXP * totalTasks;
-                        } else if (totalTasks > 0) {
-                            totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-                        }
-                    }
-
-                    // Format numbers with commas
-                    const formatNumber = (num) => {
-                        if (num === null || num === undefined) return "0";
-                        const numValue = typeof num === 'string' ? parseFloat(num.replace(/,/g, '')) : num;
-                        if (isNaN(numValue)) return "0";
-                        return numValue.toLocaleString();
-                    };
+                    // Coins and total XP from tasks (single source: getTotalPromisedPoints)
+                    const amount = normalizeGameAmount(game);
+                    const coinAmount = game.rewards?.coins ?? game.rewards?.gold ?? amount ?? 0;
+                    const raw = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(coinAmount.replace('$', '').replace(/,/g, '')) || 0 : 0);
+                    const coins = Number.isFinite(raw) ? (raw === Math.round(raw) ? Math.round(raw) : Math.round(raw * 100) / 100) : 0;
+                    const { totalXP } = getTotalPromisedPoints(game);
+                    const totalXPDisplay = Number.isFinite(totalXP) ? Math.floor(totalXP) : 0;
 
                     return (
                         <article
                             key={game._id || game.id || game.gameId || `game-${index}`}
-                            className="relative flex-shrink-0 w-[160px] sm:w-40 h-auto min-h-[281px] cursor-pointer hover:scale-105 transition-all duration-200"
+                            className="relative flex-shrink-0 w-[155px] sm:w-[155px] h-auto min-h-[275px] cursor-pointer hover:scale-105 transition-all duration-200"
                             onClick={() => handleGameClick(game)}
                         >
                             <div
-                                className="relative w-full h-[185px] bg-cover bg-center rounded-[16px] overflow-hidden"
+                                className="relative w-full h-[180px] bg-cover bg-center rounded-[16px] overflow-hidden"
                                 style={{
                                     backgroundImage: `url(${displayImage})`,
                                 }}
@@ -231,9 +193,21 @@ const Leadership = () => {
 
                                     {/* Genre - Match Highest Earning Games style */}
                                     <h4 className="[font-family:'Poppins',Helvetica] mb-2 mt-[2px] font-light text-white text-[11px] sm:text-[12px] leading-tight break-words">
-                                        ({rawData.categories?.[0]?.name || game.details?.category || (game.categories && game.categories.length > 0
-                                            ? (typeof game.categories[0] === 'object' ? game.categories[0].name || 'Game' : game.categories[0])
-                                            : 'Game')})
+                                        {(() => {
+                                            // Safely extract category name from game object
+                                            if (!game) return '(Game)';
+
+                                            const categoryName =
+                                                game.besitosRawData?.categories?.[0]?.name ||
+                                                game.details?.category ||
+                                                (game.categories && game.categories.length > 0
+                                                    ? (typeof game.categories[0] === 'object'
+                                                        ? game.categories[0].name || 'Game'
+                                                        : game.categories[0])
+                                                    : 'Game');
+
+                                            return `(${categoryName})`;
+                                        })()}
                                     </h4>
 
                                     {/* Stats - Match Highest Earning Games alignment and style */}
@@ -254,7 +228,7 @@ const Leadership = () => {
                                         </div>
                                         <div className="flex items-center justify-center min-w-fit h-[29px] px-2 rounded-[10px] bg-[linear-gradient(180deg,rgba(158,173,247,0.6)_0%,rgba(113,106,231,0.6)_100%)] relative">
                                             <span className="[font-family:'Poppins',Helvetica] font-medium text-white text-xs sm:text-sm leading-5 whitespace-nowrap">
-                                                {formatNumber(Math.floor(totalXP))}
+                                                {formatNumber(totalXPDisplay)}
                                             </span>
                                             <img
                                                 className="w-4 h-4 ml-1 flex-shrink-0"

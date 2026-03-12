@@ -98,7 +98,6 @@ const ChallengeSection = () => {
     };
 
     const handleSurveyClick = (provider) => {
-        console.log('Survey provider clicked:', provider.name);
         // You can add navigation to survey provider or open WebView here
     };
 
@@ -147,6 +146,10 @@ const ChallengeSection = () => {
                                     className="absolute inset-0 h-full w-full rounded-2xl object-cover"
                                     alt={`${provider.name} background`}
                                     src={provider.bgImage}
+                                    loading="eager"
+                                    decoding="async"
+                                    width="165"
+                                    height="190"
                                 />
                                 <div className="absolute top-[123px] left-1/2 w-full -translate-x-1/2 text-center font-['Poppins',Helvetica] font-semibold leading-tight text-[16px] tracking-[0] text-[#FFFFFF]">
                                     {/* Break name into multiple lines if it contains spaces */}
@@ -161,6 +164,10 @@ const ChallengeSection = () => {
                                     className="absolute top-[39px] left-1/2 h-auto w-20 max-h-[78px] -translate-x-1/2 object-contain"
                                     alt={`${provider.name} logo`}
                                     src={provider.image}
+                                    loading="eager"
+                                    decoding="async"
+                                    width="80"
+                                    height="78"
                                 />
                             </div>
                         </div>

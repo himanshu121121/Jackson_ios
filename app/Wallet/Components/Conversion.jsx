@@ -1,6 +1,11 @@
 "use client";
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useSelector } from "react-redux";
+import { useAppLovinAds } from '@/hooks/useAppLovinAds';
+import { Capacitor } from '@capacitor/core';
+import MockAdOverlay from '@/app/games/components/MockAdOverlay';
 import { getConversionSettings } from "../../../lib/api";
+
 
 const SCALE_CONFIG = [
     { minWidth: 0, scaleClass: "scale-90" },
@@ -59,54 +64,92 @@ const SimpleTimerModal = ({ onClose, timeLeft }) => {
     );
 };
 
-// Simple Convert Now Modal
-const ConvertNowModal = ({ onClose }) => {
-    return (
-        <div className="fixed inset-0 bg-black/90 flex flex-col justify-center items-center z-50 p-4">
-            <div className="bg-black rounded-2xl p-8 max-w-sm w-full mx-4 shadow-2xl border-2 border-white/20">
-                {/* Header */}
-                <div className="text-center mb-6">
-                    <h2 className="text-white text-2xl font-bold mb-2">Convert Now</h2>
-                    <p className="text-white/80 text-sm">Instant conversion available</p>
-                </div>
-
-                {/* Message */}
-                <div className="text-center mb-6">
-                    <p className="text-white text-base leading-relaxed">
-                        If you want to see without wait, click on convert now.
-                    </p>
-                </div>
-
-                {/* Got it Button */}
-                <button
-                    onClick={onClose}
-                    className="w-full bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] text-white  cursor-pointer font-bold py-3 px-6 rounded-lg hover:bg-gray-200 transition-colors duration-200"
-                >
-                    Got it
-                </button>
-            </div>
-        </div>
-    );
-};
-
 export const Conversion = () => {
-    // State Management
+    // VIP/subscription: same pattern as SpinWheel — subscribers skip ads
+    const vipStatus = useSelector((state) => state.profile.vipStatus);
+    const vipData = useMemo(() => {
+        const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier !== "Free";
+        return { isVipActive };
+    }, [vipStatus]);
+
+    // AppLovin MAX integration (used only when !vipData.isVipActive)
+    const {
+        isInitialized,
+        isLoading: isAdLoading,
+        isAdReady,
+        isShowingAd,
+        error: adError,
+        showAd,
+        loadAd,
+        clearError: clearAdError,
+        lastReward
+    } = useAppLovinAds();
+
+    // State Management - Separate states for different flows
     const [conversionAmount, setConversionAmount] = useState("?");
     const [coinAmount, setCoinAmount] = useState("0"); // Editable coin input
     const [currentScaleClass, setCurrentScaleClass] = useState("scale-100");
-    const [flowState, setFlowState] = useState("idle"); // 'idle', 'timerRunning', 'convertNow'
+
+    // Independent flow states
+    const [timerFlowState, setTimerFlowState] = useState("idle"); // 'idle', 'running'
+    const [adFlowState, setAdFlowState] = useState("idle"); // 'idle', 'loading', 'watching', 'completed'
+
     const [timeLeft, setTimeLeft] = useState(5 * 60); // 5 minutes in seconds
     const timerRef = useRef(null);
+    const resetResultRef = useRef(null);
+    const [error, setError] = useState(null);
     const [conversionSettings, setConversionSettings] = useState(null);
     const [isLoadingSettings, setIsLoadingSettings] = useState(false);
 
+    // Check if running on web (not native)
+    const isWeb = !Capacitor.isNativePlatform();
+    const [showMockAd, setShowMockAd] = useState(false);
+
+    const resetConversionResult = useCallback(() => {
+        setConversionAmount("?");
+    }, []);
+
+    // Calculate conversion based on fetched settings
+    const calculateConversion = useCallback(() => {
+        const userAmount = parseFloat(coinAmount) || 0;
+        let conversionRate = 0.10; // default fallback
+
+        if (conversionSettings && conversionSettings.conversionRules && conversionSettings.conversionRules.length > 0) {
+            const rule = conversionSettings.conversionRules[0];
+            if (rule.coinsPerUnit && rule.currencyAmount) {
+                conversionRate = rule.currencyAmount / rule.coinsPerUnit;
+            }
+        } else if (conversionSettings && conversionSettings.defaultRule && conversionSettings.defaultRule.coinsPerDollar) {
+            conversionRate = 1 / conversionSettings.defaultRule.coinsPerDollar;
+        }
+
+        setConversionAmount((userAmount * conversionRate).toFixed(2));
+
+        // Show result for at least 10 seconds, then reset everything
+        if (resetResultRef.current) clearTimeout(resetResultRef.current);
+        resetResultRef.current = setTimeout(() => {
+            resetConversionResult();
+            // Reset all flow states to idle after conversion display
+            setTimerFlowState("idle");
+            setAdFlowState("idle");
+            setError(null);
+            clearAdError();
+        }, 10000); // 10 seconds
+    }, [coinAmount, conversionSettings, resetConversionResult]);
+
     // --- Simple Flow Handlers ---
 
-    // Handle Convert in 5:00 - Show timer modal
+    // Handle Convert in 5:00 - Show timer modal (Independent flow)
     const handleScheduledConvert = async () => {
-        if (flowState !== "idle") return;
+        // Allow interrupting other flows
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (resetResultRef.current) clearTimeout(resetResultRef.current);
+        resetConversionResult();
+        setError(null);
+        clearAdError();
+        setAdFlowState("idle"); // Reset ad flow if it was active
 
-        setFlowState("timerRunning");
+        setTimerFlowState("running");
         setTimeLeft(5 * 60); // 5 minutes (300 seconds)
 
         // Fetch conversion settings in the background
@@ -114,8 +157,7 @@ export const Conversion = () => {
         try {
             const settings = await getConversionSettings();
             setConversionSettings(settings.data);
-        } catch (error) {
-            console.error("Failed to fetch conversion settings:", error);
+        } catch {
             // Fallback to default
             setConversionSettings({
                 conversionRules: [{
@@ -136,7 +178,7 @@ export const Conversion = () => {
                     clearInterval(timerRef.current);
                     // Show conversion result after timer completes
                     calculateConversion();
-                    setFlowState("idle"); // Reset if time runs out
+                    setTimerFlowState("idle");
                     return 0;
                 }
                 return prevTime - 1;
@@ -144,59 +186,126 @@ export const Conversion = () => {
         }, 1000);
     };
 
-    // Handle Convert Now - Show simple modal
+    // Handle Convert Now - VIP: no ad, show conversion; non-VIP: show ad first, then conversion (same logic as SpinWheel)
     const handleConvertNow = async () => {
-        if (flowState !== "idle") return;
-        setFlowState("convertNow");
 
-        // Fetch conversion settings in the background
+        // Allow interrupting other flows
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (resetResultRef.current) clearTimeout(resetResultRef.current);
+        resetConversionResult();
+        setError(null);
+        clearAdError();
+        setTimerFlowState("idle");
+        setAdFlowState("loading");
+
+        // Fetch conversion settings (both VIP and non-VIP)
         setIsLoadingSettings(true);
         try {
             const settings = await getConversionSettings();
             setConversionSettings(settings.data);
-        } catch (error) {
-            console.error("Failed to fetch conversion settings:", error);
-            // Fallback to default
+        } catch {
             setConversionSettings({
-                conversionRules: [{
-                    coinsPerUnit: 20,
-                    currencyAmount: 1
-                }],
-                defaultRule: {
-                    coinsPerDollar: 20
-                }
+                conversionRules: [{ coinsPerUnit: 20, currencyAmount: 1 }],
+                defaultRule: { coinsPerDollar: 20 }
             });
         } finally {
             setIsLoadingSettings(false);
         }
-    };
 
-    // Handle Convert Now modal close - Show conversion result
-    const handleConvertNowClose = () => {
-        calculateConversion();
-        setFlowState("idle");
-    };
-
-    // Calculate conversion based on fetched settings
-    const calculateConversion = () => {
-        const userAmount = parseFloat(coinAmount) || 0;
-        let conversionRate = 0.10; // default fallback
-
-        if (conversionSettings && conversionSettings.conversionRules && conversionSettings.conversionRules.length > 0) {
-            const rule = conversionSettings.conversionRules[0];
-            if (rule.coinsPerUnit && rule.currencyAmount) {
-                conversionRate = rule.currencyAmount / rule.coinsPerUnit;
-            }
-        } else if (conversionSettings && conversionSettings.defaultRule && conversionSettings.defaultRule.coinsPerDollar) {
-            conversionRate = 1 / conversionSettings.defaultRule.coinsPerDollar;
+        // Subscribers skip ads — show conversion immediately (same as SpinWheel VIP path)
+        if (vipData.isVipActive) {
+            setAdFlowState("completed");
+            calculateConversion();
+            return;
         }
 
-        setConversionAmount((userAmount * conversionRate).toFixed(2));
+        try {
+            if (!isInitialized) {
+                const errorMsg = 'Ad system is initializing. Please wait a moment and try again.';
+                setError(errorMsg);
+                setTimeout(() => setError(null), 5000);
+                setAdFlowState("idle");
+                return;
+            }
+
+            if (!isAdReady) {
+                const loadSuccess = await loadAd();
+                if (!loadSuccess) {
+                    throw new Error('Failed to load ad. Please try again.');
+                }
+            }
+
+            setAdFlowState("watching");
+
+            await showAd({
+                onReward: () => {
+                    setAdFlowState("completed");
+                    calculateConversion();
+                },
+                onError: (errorMsg) => {
+                    setError(errorMsg || 'Failed to show ad. Please try again.');
+                    setTimeout(() => setError(null), 5000);
+                    if (isWeb) setShowMockAd(false);
+                    setAdFlowState("idle");
+                }
+            });
+        } catch (error) {
+            const errorMsg = error.message || 'Failed to process ad. Please try again.';
+            setError(errorMsg);
+            setTimeout(() => {
+                setError(null);
+                clearAdError();
+            }, 5000);
+            setAdFlowState("idle");
+        }
     };
+
+
+    // Handle mock ad completion (for web browsers)
+    const handleMockAdComplete = () => {
+        setShowMockAd(false);
+        if (adFlowState === "watching") {
+            setAdFlowState("completed");
+            calculateConversion();
+        }
+    };
+
+    // Handle mock ad close (for web browsers)
+    const handleMockAdClose = () => {
+        setShowMockAd(false);
+        setAdFlowState("idle");
+        setError('Ad was closed. Please watch the full ad to see conversion.');
+        setTimeout(() => setError(null), 5000);
+    };
+
+    // Sync AppLovin ad showing state
+    useEffect(() => {
+        if (isShowingAd) {
+            setAdFlowState("watching");
+            if (isWeb) setShowMockAd(true);
+        } else if (adFlowState === "watching" && !isShowingAd) {
+            // Ad finished showing, but we wait for the reward callback to complete
+            if (isWeb) setShowMockAd(false);
+        }
+    }, [isShowingAd, isWeb, adFlowState]);
+
+    // Handle ad completion - this is now handled in the onReward callback
+    // No need for this effect anymore since we handle completion in handleConvertNow
+
+    // Sync ad error with component error
+    useEffect(() => {
+        if (adError) {
+            setError(adError);
+            setAdFlowState("idle");
+        }
+    }, [adError]);
 
     // Cleanup timer on component unmount
     useEffect(() => {
-        return () => clearInterval(timerRef.current);
+        return () => {
+            clearInterval(timerRef.current);
+            if (resetResultRef.current) clearTimeout(resetResultRef.current);
+        };
     }, []);
 
     const formatTime = (seconds) => {
@@ -231,20 +340,25 @@ export const Conversion = () => {
                 role="main"
                 aria-label="Currency conversion interface"
             >
+                {/* Web-only mock overlay (native uses real fullscreen ads) */}
+                {isWeb && (
+                    <MockAdOverlay
+                        isVisible={showMockAd}
+                        onComplete={handleMockAdComplete}
+                        onClose={handleMockAdClose}
+                        duration={15}
+                    />
+                )}
+
                 {/* Conditional rendering of overlays based on flowState */}
-                {flowState === 'timerRunning' && (
+                {timerFlowState === 'running' && (
                     <SimpleTimerModal
                         onClose={() => {
                             clearInterval(timerRef.current);
                             // Don't show conversion if user closes early
-                            setFlowState("idle");
+                            setTimerFlowState("idle");
                         }}
                         timeLeft={timeLeft}
-                    />
-                )}
-                {flowState === 'convertNow' && (
-                    <ConvertNowModal
-                        onClose={handleConvertNowClose}
                     />
                 )}
                 <h1 className="relative mb-1 text-family:'Poppins',Helvetica] font-semibold text-[#f4f3fc] text-[16px] tracking-[0] leading-[normal]">
@@ -258,7 +372,7 @@ export const Conversion = () => {
                 >
                     {/* Editable Coin Input Field */}
                     <div
-                        className={`relative h-[53px] flex items-center justify-center gap-1.5 rounded-[8px] border px-3 transition-all duration-200 ${flowState === 'idle'
+                        className={`relative h-[53px] flex items-center justify-center gap-1.5 rounded-[8px] border px-3 transition-all duration-200 ${timerFlowState === 'idle'
                             ? 'border-[#3C3C3C] hover:border-purple-500/50 focus-within:border-purple-500'
                             : 'border-[#3C3C3C] opacity-50'
                             }`}
@@ -281,7 +395,7 @@ export const Conversion = () => {
                             }}
                             className="bg-transparent text-white text-[13px] outline-none text-center font-medium [appearance:none] [-webkit-appearance:none] [-moz-appearance:textfield]"
                             placeholder="0"
-                            disabled={flowState !== 'idle'}
+                            disabled={timerFlowState !== 'idle'}
                             style={{
                                 width: `${Math.max(coinAmount.length * 14, 30)}px`,
                                 textAlign: 'center'
@@ -290,7 +404,11 @@ export const Conversion = () => {
                         <img
                             className="w-[23px] h-[23px] flex-shrink-0"
                             alt="Coin"
-                            src="/dollor.png"
+                            src="https://c.animaapp.com/GgG4W9O5/img/image-3937@2x.png"
+                            loading="eager"
+                            decoding="async"
+                            width={23}
+                            height={23}
                         />
                     </div>
 
@@ -303,7 +421,7 @@ export const Conversion = () => {
 
                     {/* Second field: conversionAmount (Output result) */}
                     <div
-                        className={`relative h-[53px] flex items-center rounded-[8px] border px-3 transition-all duration-200 ${flowState === 'idle'
+                        className={`relative h-[53px] flex items-center rounded-[8px] border px-3 transition-all duration-200 ${timerFlowState === 'idle'
                             ? 'border-[#3C3C3C] hover:border-purple-500/50 focus-within:border-purple-500'
                             : 'border-[#3C3C3C] opacity-50'
                             }`}
@@ -325,7 +443,7 @@ export const Conversion = () => {
 
                     {/* Currency Display (Static USD) */}
                     <div
-                        className={`relative h-[53px] w-[85px] flex items-center rounded-[8px] border px-3 transition-all duration-200 ${flowState === 'idle'
+                        className={`relative h-[53px] w-[85px] flex items-center rounded-[8px] border px-3 transition-all duration-200 ${timerFlowState === 'idle'
                             ? 'border-[#3C3C3C] hover:border-purple-500/50'
                             : 'border-[#3C3C3C] opacity-50'
                             }`}
@@ -341,52 +459,102 @@ export const Conversion = () => {
                     </div>
                 </div>
 
-
                 <div
-                    className="flex flex-col mt-2 gap-2 w-full"
+                    className="inline-flex items-center gap-14  relative flex-[0_0_auto]"
                     role="group"
                     aria-label="Conversion options"
                 >
                     {/* Convert in 5 Mins Button */}
                     <button
-                        className="bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] w-full h-12 rounded-lg overflow-hidden cursor-pointer transition-transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 relative"
+                        className="bg-[linear-gradient(180deg,rgba(158,173,247,1)_0%,rgba(113,106,231,1)_100%)] relative w-[159px] h-10 rounded-lg overflow-hidden cursor-pointer transition-transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50"
                         onClick={handleScheduledConvert}
-                        disabled={flowState !== 'idle'}
+                        disabled={timerFlowState !== 'idle'}
                         aria-label="Schedule conversion for 5 minutes"
                         role="button"
                         tabIndex={0}
                     >
-                        <div className="absolute inset-0 flex justify-center items-center font-semibold text-white text-[15px]">
-                            {flowState === 'timerRunning'
-                                ? `Time Left: ${formatTime(timeLeft)}`
-                                : 'Convert in 05:00'}
+                        <div className="absolute inset-0 flex justify-center items-center font-semibold text-white text-[13px]">
+                            {timerFlowState === 'running' ? `Time Left: ${formatTime(timeLeft)}` : 'Convert in 05:00'}
                         </div>
                     </button>
 
-                    {/* Convert Now Button */}
+                    {/* Convert Now Button — VIP: no ad; non-VIP: show ad then conversion (same as SpinWheel) */}
                     <button
-                        className="bg-[linear-gradient(180deg,rgba(251,159,68,1)_0%,rgba(241,188,132,1)_100%)] w-full h-12 rounded-lg overflow-hidden cursor-pointer transition-transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 flex items-center justify-center relative"
+                        className="bg-[linear-gradient(180deg,rgba(251,159,68,1)_0%,rgba(241,188,132,1)_100%)] relative w-[159px] h-10 rounded-lg overflow-hidden cursor-pointer transition-transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 flex items-center justify-center"
                         onClick={handleConvertNow}
-                        disabled={flowState !== 'idle'}
+                        disabled={adFlowState !== 'idle' || (!vipData.isVipActive && !isInitialized)}
                         aria-label="Convert currency now"
                         role="button"
                         tabIndex={0}
                     >
-                        <img className="w-7 h-7 mr-2" alt="Convert now icon" src="https://c.animaapp.com/GgG4W9O5/img/image-3941@2x.png" />
-                        <span className="font-semibold text-white text-[15px]">
-                            Convert Now
-                        </span>
+                        {adFlowState === "loading" || adFlowState === "watching" || (!vipData.isVipActive && (isAdLoading || isShowingAd)) ? (
+                            <>
+                                <div className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                <span className="font-semibold text-white text-[13px]">
+                                    {vipData.isVipActive
+                                        ? "Converting..."
+                                        : (adFlowState === "watching" || isShowingAd ? "Watching Ad..." : "Loading Ad...")}
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <img
+                                    className="w-7 h-7 mr-2"
+                                    alt="Convert now icon"
+                                    src="https://c.animaapp.com/GgG4W9O5/img/image-3941@2x.png"
+                                    loading="eager"
+                                    decoding="async"
+                                    width={28}
+                                    height={28}
+                                />
+                                <span className="font-semibold text-white text-[13px]">
+                                    Convert Now
+                                </span>
+                            </>
+                        )}
                     </button>
                 </div>
-                <section className="mt-2 ">
+
+                {/* Error Message */}
+                {error && (
+                    <div className="w-full mt-2 bg-red-600 rounded-lg p-3 shadow-lg animate-in slide-in-from-top-2 duration-200">
+                        <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 bg-white rounded-full flex items-center justify-center flex-shrink-0">
+                                <svg className="w-4 h-4 text-red-600" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                                </svg>
+                            </div>
+                            <p className="text-white text-sm font-medium [font-family:'Poppins',Helvetica]">
+                                {error}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {/* Success Message (when ad completes or VIP conversion completes) */}
+                {adFlowState === 'completed' && (lastReward || vipData.isVipActive) && (
+                    <div className="w-full mt-2 bg-gradient-to-r from-[#4bba56] to-[#2a8a3e] rounded-lg p-3 shadow-lg animate-in slide-in-from-top-2 duration-200">
+                        <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 bg-white rounded-full flex items-center justify-center flex-shrink-0">
+                                <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                                </svg>
+                            </div>
+                            <p className="text-white text-sm font-medium [font-family:'Poppins',Helvetica]">
+                                {vipData.isVipActive ? "🎉 Conversion amount unlocked." : "🎉 Ad completed! Conversion amount unlocked."}
+                            </p>
+                        </div>
+                    </div>
+                )}
+                <section className="mt-2">
                     <div className="w-full max-w-[335px] sm:max-w-[375px] mx-auto">
                         <div className="w-full p-4 sm:p-6 rounded-lg bg-[linear-gradient(to_right,rgba(255,255,255,0.25)_0%,rgba(255,255,255,0.1)_50%,rgba(0,0,0,0.9)_100%)] shadow-lg border border-white/20">
                             <div className="flex flex-col justify-start gap-2">
-                                <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-[#f4f3fc] text-[14px] sm:text-[14px] ">
+                                <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-[#f4f3fc] text-[14px] sm:text-[14px]">
                                     Disclaimer
                                 </h2>
                                 <p className="[font-family:'Poppins',Helvetica] font-light text-[#FFFFFF] text-[13px] sm:text-base text-start leading-5 sm:leading-6">
-                                    Points ar for loyalty use only and do not reflect real-world currency
+                                    Points are for loyalty use only and do not reflect real-world currency
                                 </p>
                             </div>
                         </div>

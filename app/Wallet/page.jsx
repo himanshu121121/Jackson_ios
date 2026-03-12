@@ -13,8 +13,8 @@ import { useSelector, useDispatch } from "react-redux";
 import { useRouter } from "next/navigation";
 import { useVipStatus } from "@/hooks/useVipStatus";
 import { useAuth } from "@/contexts/AuthContext";
-import { fetchProfileStats } from "@/lib/redux/slice/profileSlice";
 import { fetchWalletScreen } from "@/lib/redux/slice/walletTransactionsSlice";
+import { fetchProfileStats } from "@/lib/redux/slice/profileSlice";
 
 
 export default function WalletPage() {
@@ -24,7 +24,6 @@ export default function WalletPage() {
 
   const {
     detailsStatus,
-    statsStatus,
     error,
   } = useSelector((state) => state.profile);
 
@@ -37,47 +36,63 @@ export default function WalletPage() {
   const coinBalance = walletScreen?.wallet?.balance || 0;
   const balance = coinBalance || 0;
 
-  // Refresh wallet and balance data when page is visited (to get admin updates)
-  // Do this in background without blocking UI - show cached data immediately
+  // Preload critical wallet images for faster rendering on Android
+  useEffect(() => {
+    const criticalImages = [
+      '/dollor.png',
+      '/xp.svg',
+      '/dot.svg',
+      '/vipbg.svg',
+      '/vipdecoration.png',
+      '/bgearning.png'
+    ];
+
+    criticalImages.forEach(src => {
+      const link = document.createElement('link');
+      link.rel = 'preload';
+      link.as = src.endsWith('.svg') ? 'image/svg+xml' : 'image';
+      link.href = src;
+      document.head.appendChild(link);
+    });
+
+    // Cleanup function to remove preload links
+    return () => {
+      criticalImages.forEach(src => {
+        const links = document.head.querySelectorAll(`link[href="${src}"]`);
+        links.forEach(link => link.remove());
+      });
+    };
+  }, []);
+
+  // Refresh wallet data on page visit — only if cache is stale (> 1 minute old)
+  // Uses background: true so the UI never flickers into a loading state
   useEffect(() => {
     if (!token) return;
 
-    // Use setTimeout to refresh in background after showing cached data
-    // This ensures smooth UX - cached data shows immediately, fresh data loads in background
     const refreshTimer = setTimeout(() => {
-      dispatch(fetchWalletScreen({ token, force: true }));
-      dispatch(fetchProfileStats({ token, force: true }));
-    }, 100); // Small delay to let cached data render first
+      const state = require("@/lib/redux/store").store.getState().walletTransactions;
+      const ts = state.walletScreenCacheTimestamp;
+      const STALE_MS = 60 * 1000; // 1 minute
+      if (!ts || Date.now() - ts > STALE_MS) {
+        dispatch(fetchWalletScreen({ token, force: true, background: true }));
+        dispatch(fetchProfileStats({ token, force: true, background: true }));
+      }
+    }, 100);
 
     return () => clearTimeout(refreshTimer);
   }, [token, dispatch]);
 
-  // Refresh when app comes to foreground
-  useEffect(() => {
-    if (!token) return;
-
-    const handleFocus = () => {
-      dispatch(fetchWalletScreen({ token, force: true }));
-      dispatch(fetchProfileStats({ token, force: true }));
-    };
-
-    window.addEventListener("focus", handleFocus);
-
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [token, dispatch]);
-
   const handleVipUpgrade = () => {
+    if (typeof window !== "undefined") sessionStorage.setItem("buySubscriptionFrom", "/Wallet");
     router.prefetch("/BuySubscription");
     router.push("/BuySubscription");
   };
 
   // Only show loading if we have NO cached data at all
   // This allows showing cached data immediately while refreshing in background
-  const hasCachedData = walletScreen || statsStatus === 'succeeded' || detailsStatus === 'succeeded' || vipStatus;
-  const isLoading = !hasCachedData && (detailsStatus === 'loading' || statsStatus === 'loading' || walletScreenStatus === 'loading' || vipLoadingStatus === 'loading');
-  const hasFailed = detailsStatus === 'failed' || statsStatus === 'failed' || walletScreenStatus === 'failed' || vipLoadingStatus === 'failed';
+  const hasCachedData = walletScreen || detailsStatus === 'succeeded' || vipStatus;
+  const isLoading = !hasCachedData && (detailsStatus === 'loading' || walletScreenStatus === 'loading' || vipLoadingStatus === 'loading');
+  const hasFailed = detailsStatus === 'failed' || walletScreenStatus === 'failed' || vipLoadingStatus === 'failed';
 
   // Only show loading screen if we have absolutely no data
   // Otherwise, show cached data immediately and refresh in background
@@ -110,20 +125,6 @@ export default function WalletPage() {
         <SpinWin />
         <Conversion />
         <WithdrawalOption />
-        <section className="mb-5  ">
-          <div className="w-full max-w-[335px] sm:max-w-[375px] mx-auto">
-            <div className="w-full p-4 sm:p-6 rounded-lg bg-[linear-gradient(to_right,rgba(255,255,255,0.25)_0%,rgba(255,255,255,0.1)_50%,rgba(0,0,0,0.9)_100%)] shadow-lg border border-white/20">
-              <div className="flex flex-col justify-start gap-2">
-                <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-[#f4f3fc] text-[14px] sm:text-[14px] ">
-                  Disclaimer
-                </h2>
-                <p className="[font-family:'Poppins',Helvetica] font-light text-[#FFFFFF] text-[13px] sm:text-base text-start leading-5 sm:leading-6">
-                  Points ar for loyalty use only and do not reflect real-world currency
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
         <VipMember vipStatus={vipStatus} handleVipUpgrade={handleVipUpgrade} />
         <HomeIndicator activeTab="wallet" />
       </div>

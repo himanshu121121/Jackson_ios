@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback } from "react";
 
 
 export const VipMember = ({ vipStatus, handleVipUpgrade }) => {
-    const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier !== "Free";
+    const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier.toLowerCase() !== "free";
     return (
         !isVipActive ? (
             <section className="relative w-full max-w-[335px] h-[127px] mx-auto mb-30">

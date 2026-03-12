@@ -48,7 +48,7 @@ const StreakSection = () => {
     }, []);
 
     return (
-        <div className="flex flex-col w-full items-start relative">
+        <div className="flex flex-col w-full items-start relative -mb-4">
             <div
                 className="h-[111px] rounded-[20px] overflow-hidden bg-[linear-gradient(64deg,rgba(41,138,171,1)_0%,rgba(41,171,162,1)_100%)] relative w-full cursor-pointer hover:scale-[1.02] transition-transform duration-200 active:scale-[0.98]">
                 <div

@@ -1,23 +1,50 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useRealTimeCountdown } from "../hooks/useRealTimeCountdown";
 
 export const QuestCard = ({ game }) => {
     const [showTooltip, setShowTooltip] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
+    const [timeRemaining, setTimeRemaining] = useState(null);
     const tooltipRef = useRef(null);
 
+    // Get completionDeadline from first task - always use deadline time from API
+    const firstTask = game?.goals?.[0];
+    const completionDeadline = firstTask?.completionDeadline || game?.quest_end_time;
+    const apiTimeRemaining = firstTask?.timeRemaining; // in milliseconds from API (fallback only)
+    const apiIsExpired = firstTask?.isExpired; // API's expired flag
+
+    // Always prefer completionDeadline from API (absolute deadline time)
+    // This is the most accurate source of truth from the backend
+    // Use useMemo to ensure stable reference when values don't change
+    const endTime = useMemo(() => {
+        // Priority 1: Use completionDeadline from API (always use this if available, even if expired)
+        if (completionDeadline) {
+            return completionDeadline;
+        }
+        // Priority 2: Fallback to calculating from timeRemaining (only if deadline not available)
+        if (apiTimeRemaining !== null && apiTimeRemaining !== undefined && apiTimeRemaining > 0) {
+            return new Date(Date.now() + apiTimeRemaining).toISOString();
+        }
+        return null;
+    }, [completionDeadline, apiTimeRemaining]);
+
     // Use real-time countdown hook with game end time
+    // The hook will re-initialize when endTime changes due to its internal useEffect
     const {
         formatTime,
-        isExpired,
+        isExpired: hookIsExpired,
         isLoading,
-        timeRemaining
+        timeRemaining: hookTimeRemaining
     } = useRealTimeCountdown({
-        endTime: game?.quest_end_time,
+        endTime: endTime,
         defaultDuration: 24 * 60 * 60, // 24 hours in seconds
         persist: false, // Don't persist quest timers
-        autoReset: false
+        autoReset: false,
+        storageKey: `quest-timer-${game?.gameId || 'default'}` // Unique key per game
     });
+
+    // Use API's isExpired flag if available, otherwise use hook's calculation
+    const isExpired = apiIsExpired !== undefined ? apiIsExpired : hookIsExpired;
 
     // Toggle tooltip
     const toggleTooltip = () => {
@@ -43,33 +70,132 @@ export const QuestCard = ({ game }) => {
         };
     }, []);
 
-    // OPTIMIZED: Transform game goals into quest items format with better text handling
-    const displayGoals = game?.goals?.slice(0, 3) || [];
+    // Display ALL tasks from API response (no limit)
+    const displayGoals = game?.goals || [];
 
-    const questItems = displayGoals.map((goal, index) => ({
-        id: goal.goal_id || index + 1,
-        number: (index + 1).toString(),
-        // OPTIMIZED: Better text truncation and formatting for mobile
-        title: (goal.text || goal.title || `Complete Goal ${index + 1}`).length > 50
-            ? `${(goal.text || goal.title || `Complete Goal ${index + 1}`).substring(0, 47)}...`
-            : (goal.text || goal.title || `Complete Goal ${index + 1}`),
-        status: goal.completed ? "Completed" : "Pending",
-        statusColor: goal.completed ? "#81e916" : "#ffffff",
-        hasBorder: index < (displayGoals.length - 1),
-        isLocked: !goal.completed && index > 0 && !displayGoals[index - 1]?.completed,
-    }));
+    const questItems = displayGoals.map((goal, index) => {
+        // Use isUnlocked from API if available, otherwise fall back to sequential logic
+        const isUnlocked = goal.isUnlocked !== undefined
+            ? goal.isUnlocked
+            : (index === 0 || displayGoals[index - 1]?.completed);
 
-    // Determine if first three tasks are completed
-    const completedCount = questItems.filter(q => q.status === "Completed").length;
-    const showTimer = completedCount < 3 && !isExpired && !isLoading;
+        // Determine if task is locked (inverse of unlocked)
+        const isLocked = !isUnlocked;
+
+        // Determine status - show "Rewarded" if reward was awarded
+        let status = "Pending";
+        let statusColor = "#ffffff";
+
+        if (goal.completed) {
+            if (goal.rewardAwarded || goal.rewardEligible) {
+                status = "Rewarded";
+                statusColor = "#81e916";
+            } else if (goal.isExpired) {
+                status = "Expired";
+                statusColor = "#ff4444";
+            } else {
+                status = "Completed";
+                statusColor = "#81e916";
+            }
+        } else if (goal.isExpired) {
+            status = "Expired";
+            statusColor = "#ff4444";
+        }
+
+        return {
+            id: goal.goal_id || index + 1,
+            number: (index + 1).toString(),
+            // OPTIMIZED: Better text truncation and formatting for mobile
+            title: (goal.text || goal.title || `Complete Goal ${index + 1}`).length > 50
+                ? `${(goal.text || goal.title || `Complete Goal ${index + 1}`).substring(0, 47)}...`
+                : (goal.text || goal.title || `Complete Goal ${index + 1}`),
+            status: status,
+            statusColor: statusColor,
+            hasBorder: index < (displayGoals.length - 1),
+            isLocked: isLocked,
+            reward: goal.reward,
+            rewardEligible: goal.rewardEligible,
+        };
+    });
+
+    // Determine if all tasks are completed
+    const totalTasks = questItems.length;
+    const completedCount = questItems.filter(q => q.status === "Completed" || q.status === "Rewarded").length;
+    const showTimer = totalTasks > 0 && completedCount < totalTasks && !isExpired && !isLoading;
+
+    // Calculate dynamic height based on number of tasks
+    const baseHeight = 180; // Base collapsed height
+    const taskItemHeight = 87; // Spacing between task items (top to top)
+    const taskActualHeight = 75; // Actual height of each task item (h-[75px])
+    const expandedSectionTop = 142; // Top position of expanded section (top-[142px])
+
+    // Calculate exact height: container should end exactly at bottom of last task
+    // Adjust baseTop based on what's shown above tasks
+    const baseTop = isExpired
+        ? 158 // Below expired banner (102px + 48px + 8px spacing)
+        : showTimer
+            ? 158
+            : 150; // Starting position for first task (relative to card top)
+
+    // Calculate last task bottom position
+    const lastTaskBottom = questItems.length > 0
+        ? baseTop + ((questItems.length - 1) * taskItemHeight) + taskActualHeight
+        : baseHeight;
+
+    // Container height: when expanded, use last task bottom; when collapsed, use base height
+    const expandedHeight = isExpanded && questItems.length > 0
+        ? lastTaskBottom + 4 // Add 4px for rounded corners visual spacing
+        : baseHeight;
+
+    // Background div height: from expanded section start to last task bottom
+    const expandedContentHeight = isExpanded && questItems.length > 0
+        ? (lastTaskBottom - expandedSectionTop) + 4
+        : 0;
+
+    // Calculate and display the countdown for the welcome bonus expiration
+    useEffect(() => {
+        if (game?.userProgress?.gameDownloadTime && game?.completionDeadlineHours) {
+            const downloadTime = new Date(game.userProgress.gameDownloadTime).getTime();
+            const deadline = downloadTime + game.completionDeadlineHours * 60 * 60 * 1000;
+
+            const updateCountdown = () => {
+                const now = Date.now();
+                const remainingTime = deadline - now;
+
+                if (remainingTime > 0) {
+                    const hours = Math.floor(remainingTime / (1000 * 60 * 60));
+                    const minutes = Math.floor((remainingTime % (1000 * 60 * 60)) / (1000 * 60));
+                    const seconds = Math.floor((remainingTime % (1000 * 60)) / 1000);
+
+                    setTimeRemaining(`${hours}h ${minutes}m ${seconds}s`);
+                } else {
+                    setTimeRemaining('Expired');
+                }
+            };
+
+            updateCountdown();
+            const interval = setInterval(updateCountdown, 1000);
+
+            return () => clearInterval(interval);
+        }
+    }, [game]);
 
     return (
         <>
             <div
-                className={`relative w-[334px] mx-auto bg-[#7920cf] rounded-[20px] overflow-hidden shadow-lg transition-all duration-300 ${isExpanded ? "h-[420px]" : "h-[180px]"}`}
+                className="relative w-[334px] mx-auto bg-[#7920cf] rounded-[20px] overflow-hidden shadow-lg transition-all duration-300"
+                style={{
+                    height: isExpanded ? `${expandedHeight}px` : `${baseHeight}px`
+                }}
                 data-model-id="2630:14132"
             >
-                <div className={`absolute top-[142px] left-px w-[334px] bg-[#982fbb] rounded-[0px_0px_20px_20px] transition-all duration-300 ${isExpanded ? "h-[290px]" : "h-0"}`} />
+                <div
+                    className="absolute top-[142px] left-px w-[334px] bg-[#982fbb] rounded-[0px_0px_20px_20px] transition-all duration-300"
+                    style={{
+                        height: `${expandedContentHeight}px`,
+                        bottom: 0
+                    }}
+                />
 
                 <button
                     className="absolute w-8 h-8 top-[-4px] right-[-4px] z-20 cursor-pointer hover:opacity-80 transition-opacity duration-200 rounded-tr-lg rounded-bl-lg overflow-hidden flex items-center justify-center"
@@ -133,7 +259,7 @@ export const QuestCard = ({ game }) => {
                         {/* Title */}
                         <span className="font-poppins font-bold text-white text-lg leading-tight break-words">
                             {(() => {
-                                const title = game?.title || game?.details?.name;
+                                const title = game?.title || game?.details?.name || 'Game';
                                 // Remove "Android" text from the title
                                 return title
                                     .replace(/\s*Android\s*/gi, '') // Removes "Android"
@@ -144,10 +270,10 @@ export const QuestCard = ({ game }) => {
 
                         {/* Coins + XP */}
                         <div className="flex flex-wrap   gap-2 mt-2">
-                            {/* Coins */}
+                            {/* Coins - Use reward data from first task if available, otherwise default */}
                             <div className="flex items-center gap-1 px-3 py-1 rounded-full bg-white/15 backdrop-blur-sm">
                                 <span className="text-white font-semibold text-sm">
-                                    {game?.coins || 100}
+                                    {game?.goals?.[0]?.reward?.coins || game?.coins || 100}
                                 </span>
                                 <img
                                     src="/dollor.png"
@@ -160,10 +286,10 @@ export const QuestCard = ({ game }) => {
                                 />
                             </div>
 
-                            {/* XP */}
+                            {/* XP - Use reward data from first task if available, otherwise default */}
                             <div className="flex items-center gap-1 px-3 py-1 rounded-full bg-white/15 backdrop-blur-sm">
                                 <span className="text-white font-semibold text-sm">
-                                    {game?.xp || 20}
+                                    {game?.goals?.[0]?.reward?.xp || game?.xp || 20}
                                 </span>
                                 <img
                                     src="https://c.animaapp.com/mHRmJGe1/img/pic.svg"
@@ -181,7 +307,12 @@ export const QuestCard = ({ game }) => {
 
                 {/* Toggle button for expanding/collapsing tasks */}
                 <div
-                    className={`inline-flex items-center justify-center absolute ${showTimer ? "top-[150px]" : "top-[142px]"} mt-1  left-1/2 -translate-x-1/2 transition-all duration-300 z-10`}
+                    className={`inline-flex items-center justify-center absolute ${isExpired
+                        ? "top-[154px]" // Below expired banner, moved up slightly
+                        : showTimer
+                            ? "top-[150px]"
+                            : "top-[142px]"
+                        } mt-1 left-1/2 -translate-x-1/2 transition-all duration-300 z-10`}
                     onClick={toggleExpanded}
                 >
                     <img
@@ -196,56 +327,66 @@ export const QuestCard = ({ game }) => {
                 </div>
 
                 {/* Quest items - only show when expanded */}
-                {isExpanded && questItems.map((quest, index) => (
-                    <div
-                        key={quest.id}
-                        className="flex items-center justify-center absolute left-1/2 -translate-x-1/2 animate-fade-in"
-                        style={{
-                            top: `${158 + index * 87}px`,
-                            animationDelay: `${index * 0.1}s`
-                        }}
-                    >
+                {isExpanded && questItems.map((quest, index) => {
+                    // Dynamic top position based on what's shown above (expired banner, timer, or nothing)
+                    const taskBaseTop = isExpired
+                        ? 158 // Below expired banner
+                        : showTimer
+                            ? 158
+                            : 150;
+                    const taskTop = taskBaseTop + (index * taskItemHeight);
+
+                    return (
                         <div
-                            className={`relative w-[304px] h-[75px] px-2 ${quest.hasBorder ? "border-b [border-bottom-style:solid] border-[#cacaca80]" : ""}`}
+                            key={quest.id}
+                            className="flex items-center justify-center absolute left-1/2 -translate-x-1/2 animate-fade-in"
+                            style={{
+                                top: `${taskTop}px`,
+                                animationDelay: `${index * 0.1}s`
+                            }}
                         >
-                            <div className="flex w-[14.14%] mt-[1px] h-[57.33%] items-center justify-around gap-[12.59px] px-[12.59px] py-[10.49px] absolute top-[14.00%] left-0 bg-[#4a347a] rounded-[50px] shadow-[0px_4px_4px_#00000040]">
-                                {quest.isLocked ? (
-                                    <div className="flex w-[48px] h-[43px] items-center justify-around gap-[12.59px] px-[12.59px] py-[10.49px] absolute top-[2px] left-0.5 rounded-[104.88px]">
-                                        <div className="absolute top-px bottom-1 -left-0.5 w-[43px] h-[43px]">
-                                            <img
-                                                className="absolute top-0.5 left-1 w-[35px] h-[35px] aspect-[1] object-cover"
-                                                alt="Lock"
-                                                src="https://c.animaapp.com/FYtIEbRF/img/image-3943@2x.png"
-                                                loading="eager"
-                                                decoding="async"
-                                                width={35}
-                                                height={35}
-                                            />
-                                            <div className="absolute top-[-3px] left-[px] w-[45px] h-[44px] bg-[#d6d6d680] rounded-[21.5px]" />
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="relative w-fit mt-[-1.04px] [font-family:'Poppins',Helvetica] font-semibold text-white-f4f3fc text-[14.7px] tracking-[0] leading-[normal]">
-                                        {quest.number}
-                                    </div>
-                                )}
-                            </div>
-
-                            <p
-                                className={`absolute ${quest.isLocked ? "w-[50%] h-[48.00%]" : "w-[50%] h-[29.33%]"} top-1/2 left-[18%] transform -translate-y-1/2 [font-family:'Poppins',Helvetica] font-bold text-white text-sm tracking-[0.02px] leading-[normal] break-words text-center flex items-center justify-center`}
-                            >
-                                {quest.title}
-                            </p>
-
                             <div
-                                className={`absolute w-[28%] h-[22.67%] top-[50%] right-[4px] [font-family:'Poppins',Helvetica] font-bold text-sm text-start tracking-[0] leading-[17px] whitespace-nowrap transform -translate-y-1/2`}
-                                style={{ color: quest.statusColor }}
+                                className={`relative w-[304px] h-[75px] px-2 ${quest.hasBorder ? "border-b [border-bottom-style:solid] border-[#cacaca80]" : ""}`}
                             >
-                                {quest.status}
+                                <div className="flex w-[14.14%] mt-[1px] h-[57.33%] items-center justify-around gap-[12.59px] px-[12.59px] py-[10.49px] absolute top-[14.00%] left-0 bg-[#4a347a] rounded-[50px] shadow-[0px_4px_4px_#00000040]">
+                                    {quest.isLocked ? (
+                                        <div className="flex w-[48px] h-[43px] items-center justify-around gap-[12.59px] px-[12.59px] py-[10.49px] absolute top-[2px] left-0.5 rounded-[104.88px]">
+                                            <div className="absolute top-px bottom-1 -left-0.5 w-[43px] h-[43px]">
+                                                <img
+                                                    className="absolute top-0.5 left-1 w-[35px] h-[35px] aspect-[1] object-cover"
+                                                    alt="Lock"
+                                                    src="https://c.animaapp.com/FYtIEbRF/img/image-3943@2x.png"
+                                                    loading="eager"
+                                                    decoding="async"
+                                                    width={35}
+                                                    height={35}
+                                                />
+                                                <div className="absolute top-[-3px] left-[px] w-[45px] h-[44px] bg-[#d6d6d680] rounded-[21.5px]" />
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="relative w-fit mt-[-1.04px] [font-family:'Poppins',Helvetica] font-semibold text-white-f4f3fc text-[14.7px] tracking-[0] leading-[normal]">
+                                            {quest.number}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <p
+                                    className={`absolute ${quest.isLocked ? "w-[50%] h-[48.00%]" : "w-[50%] h-[29.33%]"} top-1/2 left-[18%] transform -translate-y-1/2 [font-family:'Poppins',Helvetica] font-bold text-white text-sm tracking-[0.02px] leading-[normal] break-words text-center flex items-center justify-center`}
+                                >
+                                    {quest.title}
+                                </p>
+
+                                <div
+                                    className={`absolute w-[28%] h-[22.67%] top-[50%] right-[4px] [font-family:'Poppins',Helvetica] font-bold text-sm text-start tracking-[0] leading-[17px] whitespace-nowrap transform -translate-y-1/2`}
+                                    style={{ color: quest.statusColor }}
+                                >
+                                    {quest.status}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
 
             {/* Tooltip - Same style as WelcomeOffer */}

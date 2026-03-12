@@ -1,12 +1,15 @@
 "use client";
 import Image from "next/image";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { useRouter } from "next/navigation";
 import { handleGameDownload } from "@/lib/gameDownloadUtils";
 import { fetchGamesBySection } from "@/lib/redux/slice/gameSlice";
-import { filterIosTitleGames } from "@/lib/utils/gameFilters";
-// Removed getAgeGroupFromProfile and getGenderFromProfile - now passing user object directly
+import { store } from "@/lib/redux/store";
+import { normalizeGameImages, normalizeGameTitle, normalizeGameCategory, normalizeGameAmount, getTotalPromisedPoints } from "@/lib/gameDataNormalizer";
+
+const EMPTY_ARRAY = [];
+
 const SCALE_CONFIG = [
     { minWidth: 0, scaleClass: "scale-90" },
     { minWidth: 320, scaleClass: "scale-90" },
@@ -23,142 +26,87 @@ export const HighestEarningGame = () => {
     const dispatch = useDispatch();
     const [currentScaleClass, setCurrentScaleClass] = useState("scale-100");
 
-    // Use new game discovery API for Highest Earning section
-    const { gamesBySection, gamesBySectionStatus } = useSelector((state) => state.games);
-    const { details: userProfile } = useSelector((state) => state.profile);
-
-    // Get data for "Highest Earning" section specifically
     const sectionName = "Highest Earning";
-    const highestEarningGames = gamesBySection[sectionName] || [];
-    const highestEarningStatus = gamesBySectionStatus[sectionName] || "idle";
+    const CACHE_STALE_MS = 5 * 60 * 1000;
+    const FOCUS_REFRESH_STALE_MS = 2 * 60 * 1000;
 
-    // STALE-WHILE-REVALIDATE: Always fetch - will use cache if available and fresh
+    // FIX: select only this section's data so re-renders only happen when "Highest Earning" changes,
+    // not every time Swipe / MostPlayed / Leadership etc. update their Redux state
+    const highestEarningGames = useSelector((state) => state.games.gamesBySection[sectionName] ?? EMPTY_ARRAY);
+    const sectionStatus = useSelector((state) => state.games.gamesBySectionStatus[sectionName] || "idle");
+    const sectionTimestamp = useSelector((state) => state.games.gamesBySectionTimestamp[sectionName]);
+    const { details: userProfile } = useSelector((state) => state.profile);
+    // Stable user ID avoids re-triggering the effect on every profile data refresh
+    const userId = userProfile?._id || userProfile?.id;
+    const userProfileRef = useRef(userProfile);
+    userProfileRef.current = userProfile;
+
+    // One discover call only on mount — same pattern as MostPlayedGames / GameCard.
+    // Empty deps [] ensures this runs exactly once; guards prevent redundant API calls.
     useEffect(() => {
-        // Always dispatch - stale-while-revalidate will handle cache logic automatically
-        // Pass user object directly - API will extract age and gender dynamically
-        // This ensures:
-        // 1. Shows cached data immediately if available (< 5 min old)
-        // 2. Refreshes in background if cache is stale or 80% expired
-        // 3. Fetches fresh if no cache exists
+        const hasFreshCache = sectionTimestamp != null && Date.now() - sectionTimestamp < CACHE_STALE_MS;
+        if (hasFreshCache || sectionStatus === "loading" || sectionStatus === "failed") return;
         dispatch(fetchGamesBySection({
             uiSection: sectionName,
-            user: userProfile,
+            user: userProfileRef.current,
             page: 1,
             limit: 10
         }));
-    }, [dispatch, sectionName, userProfile]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Refresh games in background after showing cached data (to get admin updates)
-    // Do this in background without blocking UI - show cached data immediately
+    // Return to app (focus): one discover call only if cache older than 2 min. Same pattern as MostPlayedGames / GameCard.
     useEffect(() => {
-        if (!userProfile) return;
-
-        // Use setTimeout to refresh in background after showing cached data
-        // This ensures smooth UX - cached data shows immediately, fresh data loads in background
-        const refreshTimer = setTimeout(() => {
+        const handleRefreshIfStale = () => {
+            const state = store.getState();
+            const ts = state.games.gamesBySectionTimestamp[sectionName];
+            const isStale = !ts || Date.now() - ts > FOCUS_REFRESH_STALE_MS;
+            if (!isStale) return;
+            const user = state.profile.details;
             dispatch(fetchGamesBySection({
                 uiSection: sectionName,
-                user: userProfile,
+                user: user || null,
                 page: 1,
                 limit: 10,
                 force: true,
                 background: true
             }));
-        }, 100); // Small delay to let cached data render first
+        };
 
-        return () => clearTimeout(refreshTimer);
-    }, [dispatch, sectionName, userProfile]);
-
-    // Refresh games in background when app comes to foreground (admin might have updated)
-    useEffect(() => {
-        if (!userProfile) return;
-
-        const handleFocus = () => {
-            dispatch(fetchGamesBySection({
-                uiSection: sectionName,
-                user: userProfile,
-                page: 1,
-                limit: 10,
-                force: true,
-                background: true
-            }));
+        const handleFocus = () => handleRefreshIfStale();
+        const handleVisibility = () => {
+            if (!document.hidden) handleRefreshIfStale();
         };
 
         window.addEventListener("focus", handleFocus);
-
-        const handleVisibilityChange = () => {
-            if (!document.hidden && userProfile) {
-                dispatch(fetchGamesBySection({
-                    uiSection: sectionName,
-                    user: userProfile,
-                    page: 1,
-                    limit: 10,
-                    force: true,
-                    background: true
-                }));
-            }
-        };
-
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", handleVisibility);
 
         return () => {
             window.removeEventListener("focus", handleFocus);
-            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            document.removeEventListener("visibilitychange", handleVisibility);
         };
-    }, [dispatch, sectionName, userProfile]);
+    }, [dispatch, sectionName]);
 
-    // Only show games whose title contains "ios" (case-insensitive)
-    const iosHighestEarningGames = filterIosTitleGames(highestEarningGames);
+    // Map the new API data to component format - using normalizer for both besitos and bitlab
+    const processedGames = highestEarningGames?.slice(0, 2).map((game) => {
+        const images = normalizeGameImages(game);
+        const title = normalizeGameTitle(game);
+        const category = normalizeGameCategory(game);
+        const amount = normalizeGameAmount(game);
 
-    // Map the new API data to component format - using besitosRawData
-    const processedGames = iosHighestEarningGames?.slice(0, 2).map((game) => {
-        // Use besitosRawData if available
-        const rawData = game.besitosRawData || {};
-
-        // Calculate coins - use rewards.coins first (from API), then fallback to amount
-        // Priority: rewards.coins > besitosRawData.amount > game.amount
-        const coinAmount = game.rewards?.coins || rawData.amount || game.amount || 0;
-        const earnings = typeof coinAmount === 'number' ? coinAmount.toString() : (typeof coinAmount === 'string' ? coinAmount.replace('$', '') : '0');
-
-        // Calculate total XP with progressive multiplier (same as game details page)
-        // Task 1: baseXP × multiplier^0
-        // Task 2: baseXP × multiplier^1
-        // Task 3: baseXP × multiplier^2
-        // ...
-        // Total = sum of all task XPs
-        let totalXP = 0;
-        if (game.rewards?.xp) {
-            // Use rewards.xp if available
-            totalXP = game.rewards.xp;
-        } else {
-            // Calculate from xpRewardConfig with progressive multiplier
-            const xpConfig = game.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-            const baseXP = xpConfig.baseXP || 1;
-            const multiplier = xpConfig.multiplier || 1;
-
-            // Get total number of tasks/goals
-            const goals = rawData.goals || game.goals || [];
-            const totalTasks = goals.length || 0;
-
-            // Calculate total XP: sum of baseXP × multiplier^taskIndex for all tasks
-            // This is a geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1) when multiplier ≠ 1
-            // When multiplier = 1, it's just baseXP × totalTasks
-            if (multiplier === 1) {
-                // Simple case: all tasks have same XP
-                totalXP = baseXP * totalTasks;
-            } else if (totalTasks > 0) {
-                // Geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1)
-                totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-            }
-        }
+        // Prefer API rewards.coins / rewards.gold everywhere
+        const coinAmount = game.rewards?.coins ?? game.rewards?.gold ?? amount ?? 0;
+        const raw = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(String(coinAmount).replace('$', '')) || 0 : 0);
+        const earnings = Number.isFinite(raw) ? (raw === Math.round(raw) ? String(Math.round(raw)) : (Math.round(raw * 100) / 100).toString()) : '0';
+        const { totalXP } = getTotalPromisedPoints(game);
+        const totalXPDisplay = Number.isFinite(totalXP) ? Math.floor(totalXP) : 0;
 
         return {
-            id: game._id || game.id || game.gameId,
-            title: rawData.title || game.details?.name || game.name || game.title || 'Game',
-            category: rawData.categories?.[0]?.name || game.details?.category || (typeof game.categories?.[0] === 'string' ? game.categories[0] : 'Action'),
-            image: rawData.square_image || rawData.image || game.images?.banner || game.images?.large_image || game.image || game.square_image,
+            id: game.gameId || game.details?.id || game._id || game.id,
+            title: title,
+            category: category,
+            image: images.square_image || images.icon || game.images?.banner || game.images?.large_image || game.image || game.square_image,
             earnings: earnings, // Now shows coins without $ sign
-            totalXP: Math.floor(totalXP), // Total XP calculated with progressive multiplier
+            totalXP: totalXPDisplay, // Total XP from tasks (getTotalPromisedPoints)
             fullGameData: game // Store full game including besitosRawData
         };
     }) || [];
@@ -178,8 +126,8 @@ export const HighestEarningGame = () => {
             }
         }
 
-        // Use the id from the API response for navigation
-        const gameId = game.id || game._id || game.gameId;
+        // Use provider gameId (BitLabs/Besitos) for get-game-by-id API; fallback to id/_id
+        const gameId = fullGame?.gameId || fullGame?.details?.id || fullGame?.id || fullGame?._id;
         router.push(`/gamedetails?gameId=${gameId}&source=highestEarning`);
     };
 
@@ -218,7 +166,7 @@ export const HighestEarningGame = () => {
                                 <div className="relative w-full h-[180px] rounded-[20px] overflow-hidden bg-gray-800">
                                     <img
                                         className="w-full h-full object-cover rounded-[20px]"
-                                        src={game.image || game.square_image || '/placeholder-game.png'}
+                                        src={game.image || game.square_image || 'https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png'}
                                         alt={game.title || 'Game Image'}
                                         loading="eager"
                                         decoding="async"
@@ -282,7 +230,7 @@ export const HighestEarningGame = () => {
                         )) : (
                             <div className="w-full flex flex-col items-center justify-center py-6 px-4">
                                 <h3 className="[font-family:'Poppins',Helvetica] font-semibold text-white text-lg mb-2 text-center">
-                                    Highest Earning
+                                    Gaming - Highest Earning
                                 </h3>
                                 <p className="[font-family:'Poppins',Helvetica] font-normal text-gray-400 text-sm text-center">
                                     No games available

@@ -7,6 +7,7 @@ export const SimpleSpinWheel = ({ onSpinComplete, isSpinning, disabled, onSpinSt
     const [isAnimating, setIsAnimating] = useState(false);
     const [spinMessage, setSpinMessage] = useState("");
     const spinSuccessRef = useRef(false);
+    const onSpinCompleteCalledRef = useRef(false);
 
     const handleSpin = async () => {
         if (disabled || isAnimating || isSpinning) return;
@@ -25,6 +26,7 @@ export const SimpleSpinWheel = ({ onSpinComplete, isSpinning, disabled, onSpinSt
 
         setRotation(finalRotation);
         spinSuccessRef.current = false;
+        onSpinCompleteCalledRef.current = false;
 
         // Call spin API and retry until successful (during the animation)
         let attempts = 0;
@@ -37,15 +39,20 @@ export const SimpleSpinWheel = ({ onSpinComplete, isSpinning, disabled, onSpinSt
                     attempts++;
 
                     const spinResult = await spinForChallenge(token);
+                    const success = spinResult?.success === true || spinResult?.data?.success === true;
 
-                    if (spinResult?.success) {
+                    if (success) {
                         spinSuccessRef.current = true;
                         setSpinMessage("✅ Spin successful!");
-
+                        setIsAnimating(false);
                         if (onSpinSuccess) {
                             onSpinSuccess(spinResult);
                         }
-                        break;
+                        if (onSpinComplete && !onSpinCompleteCalledRef.current) {
+                            onSpinCompleteCalledRef.current = true;
+                            onSpinComplete(true);
+                        }
+                        return;
                     } else {
                         setSpinMessage(`Retrying... (${attempts}/${maxAttempts})`);
 
@@ -74,16 +81,23 @@ export const SimpleSpinWheel = ({ onSpinComplete, isSpinning, disabled, onSpinSt
 
         // After animation completes (3 seconds), call onSpinComplete
         setTimeout(async () => {
-            // Wait a bit more if API is still running
+            // Wait longer for API to complete (up to 10 seconds total)
             let waitCount = 0;
-            while (!spinSuccessRef.current && waitCount < 5) {
+            while (!spinSuccessRef.current && waitCount < 14) { // 7 * 500ms = 3.5s extra wait
                 await new Promise(resolve => setTimeout(resolve, 500));
                 waitCount++;
             }
 
             setIsAnimating(false);
-            if (onSpinComplete) {
+
+            // Only call onSpinComplete if we haven't already (e.g. when API succeeded early)
+            if (onSpinComplete && !onSpinCompleteCalledRef.current) {
+                onSpinCompleteCalledRef.current = true;
                 onSpinComplete(spinSuccessRef.current);
+            }
+
+            if (!spinSuccessRef.current) {
+                setSpinMessage("❌ Spin failed. Please try again.");
             }
         }, 3000);
     };

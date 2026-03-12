@@ -1,16 +1,20 @@
 "use client";
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { useSelector } from "react-redux";
 import { XPPointsModal } from "../../../components/XPPointsModal";
 import { useWalletUpdates } from "@/hooks/useWalletUpdates";
 import { getXPTierProgressBar } from "@/lib/api";
 
+// XP from profile API (https://rewardsapi.hireagent.co/api/profile) -> xp.current, xp.total, xp.tier
 const XPTierTracker = ({ stats, token }) => {
     const [isXPModalOpen, setIsXPModalOpen] = useState(false);
     const [isAnimating, setIsAnimating] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const buttonRef = useRef(null);
+    const profile = useSelector((state) => state.profile.details);
     const { realTimeXP } = useWalletUpdates(token);
-    const xpCurrent = realTimeXP;
+    const profileXP = profile?.xp ?? profile?.data?.xp;
+    const xpCurrent = profileXP?.current ?? realTimeXP;
 
     // Cache key for localStorage
     const CACHE_KEY = 'xpTierProgressBar';
@@ -72,7 +76,7 @@ const XPTierTracker = ({ stats, token }) => {
         // Check cache validity
         let shouldFetch = false;
         let hasValidCache = false;
-        
+
         try {
             const cachedData = localStorage.getItem(CACHE_KEY);
             if (cachedData) {
@@ -163,12 +167,12 @@ const XPTierTracker = ({ stats, token }) => {
         };
     }, [token]);
 
-    // OPTIMIZED: Memoize progress data from API response with real-time XP updates
+    // OPTIMIZED: Memoize progress data from API response; prefer profile API (xp.current, xp.total) for numbers
     const progressData = useMemo(() => {
         // Use API data if available, otherwise fallback to stats prop
         if (xpTierData) {
-            // Use real-time XP if available (from useWalletUpdates), otherwise use API data
             const currentXP = (xpCurrent !== null && xpCurrent !== undefined) ? xpCurrent : (xpTierData.currentXP || 0);
+            const totalXPFromProfile = profileXP?.total;
             const currentTier = xpTierData.currentTier || null;
             const tiers = xpTierData.tiers || [];
 
@@ -185,11 +189,14 @@ const XPTierTracker = ({ stats, token }) => {
             let totalXP = 1000;
 
             if (currentTier && tiers.length > 0) {
-                // Find the maximum tier's xpMax for totalXP display
-                const maxTier = tiers.reduce((max, tier) =>
-                    (tier.xpMax > (max?.xpMax || 0)) ? tier : max, tiers[0]
-                );
-                totalXP = maxTier.xpMax || currentTier.xpMax || 1000;
+                if (totalXPFromProfile != null && totalXPFromProfile > 0) {
+                    totalXP = totalXPFromProfile;
+                } else {
+                    const maxTier = tiers.reduce((max, tier) =>
+                        (tier.xpMax > (max?.xpMax || 0)) ? tier : max, tiers[0]
+                    );
+                    totalXP = maxTier.xpMax || currentTier.xpMax || 1000;
+                }
 
                 const tierName = currentTier.name || "";
                 const tierRange = currentTier.xpMax - currentTier.xpMin;
@@ -241,8 +248,7 @@ const XPTierTracker = ({ stats, token }) => {
                 progressBarWidth = Math.min(progressBarWidth, BAR_WIDTH - progressBarStart);
                 indicatorPosition = Math.max(0, Math.min(indicatorPosition, BAR_WIDTH - 6));
             } else {
-                // Fallback calculation
-                totalXP = currentTier?.xpMax || xpTierData.totalXP || 1000;
+                totalXP = totalXPFromProfile ?? currentTier?.xpMax ?? xpTierData.totalXP ?? 1000;
                 const progressPercentage = totalXP > 0 ? Math.min((currentXP / totalXP) * 100, 100) : 0;
                 progressBarStart = 0;
                 progressBarWidth = (BAR_WIDTH * progressPercentage) / 100;
@@ -264,9 +270,9 @@ const XPTierTracker = ({ stats, token }) => {
             };
         }
 
-        // Fallback to stats prop if API data not loaded yet
-        const currentXp = (xpCurrent !== null && xpCurrent !== undefined) ? xpCurrent : (stats?.currentXP ?? 0);
-        const totalXpGoal = 1000;
+        // Fallback to stats prop or profile API if API data not loaded yet
+        const currentXp = (xpCurrent !== null && xpCurrent !== undefined) ? xpCurrent : (stats?.currentXP ?? profileXP?.current ?? 0);
+        const totalXpGoal = profileXP?.total ?? 1000;
         const progressPercentage = Math.min((currentXp / totalXpGoal) * 100, 100);
         const BAR_WIDTH = 288;
         const progressBarWidth = (BAR_WIDTH * progressPercentage) / 100;
@@ -283,7 +289,7 @@ const XPTierTracker = ({ stats, token }) => {
             progressBarWidth: progressBarWidth,
             indicatorPosition: progressBarWidth,
         };
-    }, [xpTierData, stats?.currentXP, xpCurrent]);
+    }, [xpTierData, stats?.currentXP, xpCurrent, profileXP?.current, profileXP?.total]);
 
     // OPTIMIZED: Memoize event handler with smooth animation
     const handleModalOpen = useCallback(() => {

@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { useRouter } from "next/navigation";
-import { fetchUserData } from "@/lib/redux/slice/gameSlice";
+import { fetchUserData, loadUserDataFromCache, fetchBitlabsAIDownloadedGames } from "@/lib/redux/slice/gameSlice";
 import { safeLocalStorage } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 import GameItemCard from "./GameItemCard";
@@ -79,7 +79,7 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
   const { token } = useAuth();
 
   // Redux
-  const { inProgressGames, userDataStatus, error } = useSelector((state) => state.games);
+  const { inProgressGames, bitlabsAIDownloadedGames, userDataStatus, bitlabsAIDownloadedGamesStatus, error } = useSelector((state) => state.games);
 
   // Client-side only state to prevent hydration mismatches
   const [isClient, setIsClient] = useState(false);
@@ -105,32 +105,26 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
     return null;
   };
 
-  // Refresh user data in background when app comes to foreground (admin might have updated)
+  // Refresh user data when app comes to foreground — stale check prevents redundant calls.
+  // Only visibilitychange is used (focus also fires on return causing double fetchUserData).
   useEffect(() => {
     if (!isClient) return;
 
-    const handleFocus = () => {
-      const userId = getUserId();
-      if (userId) {
-        dispatch(fetchUserData({ userId, token, force: true, background: true }));
-      }
-    };
-
-    window.addEventListener('focus', handleFocus);
-
+    const STALE_MS = 2 * 60 * 1000;
     const handleVisibilityChange = () => {
-      if (!document.hidden && isClient) {
-        const userId = getUserId();
-        if (userId) {
-          dispatch(fetchUserData({ userId, token, force: true, background: true }));
-        }
-      }
+      if (document.hidden) return;
+      const userId = getUserId();
+      if (!userId) return;
+      const lastFetch = safeLocalStorage.getItem(`userData_lastFetch_${userId}`);
+      const isStale = !lastFetch || Date.now() - parseInt(lastFetch, 10) > STALE_MS;
+      if (!isStale) return;
+      safeLocalStorage.setItem(`userData_lastFetch_${userId}`, String(Date.now()));
+      dispatch(fetchUserData({ userId, token, force: true, background: true }));
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [isClient, dispatch, token]);
@@ -138,6 +132,34 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
   // Track loading at download event
   const refreshingRef = useRef(false);
 
+  // Load cached data from localStorage immediately for instant display
+  useEffect(() => {
+    if (!isClient) return;
+
+    const userId = getUserId();
+    if (!userId) return;
+
+    // Load from localStorage cache immediately (before API call)
+    try {
+      const CACHE_KEY = `userData_${userId}`;
+      const cachedData = localStorage.getItem(CACHE_KEY);
+      if (cachedData) {
+        const parsed = JSON.parse(cachedData);
+        const cacheAge = Date.now() - (parsed.timestamp || 0);
+        const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+        // Load cache if it exists (even if stale - will refresh in background)
+        if (parsed.data && cacheAge < CACHE_TTL * 2) { // Allow stale cache up to 10 minutes
+          dispatch(loadUserDataFromCache({
+            userData: parsed.data,
+            timestamp: parsed.timestamp,
+          }));
+        }
+      }
+    } catch (err) {
+      // Failed to load cache - continue to API fetch
+    }
+  }, [dispatch, isClient]);
 
   // Single data fetch on component mount - stale-while-revalidate handles caching
   // This fetches data once, showing cached data immediately if available
@@ -147,9 +169,12 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
 
     const userId = getUserId();
     if (userId) {
-      // Fetch data - stale-while-revalidate will return cached data immediately if available
+      // Fetch Besitos data - stale-while-revalidate will return cached data immediately if available
       // and refresh in background automatically
       dispatch(fetchUserData({ userId, token }));
+
+      // Fetch Bitlabs AI downloaded games
+      dispatch(fetchBitlabsAIDownloadedGames({ userId, token }));
     }
   }, [dispatch, isClient, token]);
 
@@ -186,53 +211,119 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
 
   // Add retry mechanism for failed requests
   useEffect(() => {
-    if (userDataStatus === "failed" && !refreshingRef.current) {
-      const userId = getUserId();
-      if (userId) {
-        setTimeout(() => {
-          dispatch(fetchUserData({ userId, token }));
-        }, 2000); // Retry after 2 seconds
-      }
+    const userId = getUserId();
+
+    // Retry Besitos data if failed
+    if (userDataStatus === "failed" && !refreshingRef.current && userId) {
+      setTimeout(() => {
+        dispatch(fetchUserData({ userId, token }));
+      }, 2000); // Retry after 2 seconds
     }
-  }, [userDataStatus, dispatch]);
+
+    // Retry Bitlabs AI data if failed
+    if (bitlabsAIDownloadedGamesStatus === "failed" && !refreshingRef.current && userId) {
+      setTimeout(() => {
+        dispatch(fetchBitlabsAIDownloadedGames({ userId, token }));
+      }, 2000); // Retry after 2 seconds
+    }
+  }, [userDataStatus, bitlabsAIDownloadedGamesStatus, dispatch]);
 
 
-  // Re-map with safety check
-  const downloadedGames = (inProgressGames && Array.isArray(inProgressGames) ? inProgressGames : []).map((game) => {
-    const completedGoalsCount = game.goals?.filter(g => g.completed === true).length || 0;
-    const totalGoals = game.goals?.length || 0;
-    const earnedAmount = game.goals
-      ?.filter(g => g.completed === true)
-      .reduce((sum, goal) => sum + (goal.amount || 0), 0) || 0;
-    const xpBonus = Math.floor(earnedAmount * 0.1);
+  // Combine Besitos and Bitlabs AI downloaded games — exclude stub/empty entries so we don't show a default "(Game)" when no real data came from Bitlab/Besitos
+  const hasValidName = (g) =>
+    g && typeof g === "object" && (g.title || g.name || g.product_name || g.anchor || g.details?.name);
+  const besitosGames = (inProgressGames && Array.isArray(inProgressGames) ? inProgressGames : []).filter(hasValidName);
+  const bitlabsAIGames = (bitlabsAIDownloadedGames && Array.isArray(bitlabsAIDownloadedGames) ? bitlabsAIDownloadedGames : []).filter(hasValidName);
+  const allDownloadedGames = [...besitosGames, ...bitlabsAIGames];
+
+  // Re-map with safety check for both data sources (Besitos + BitLabs AI)
+  // Use same id/image mapping as UI sections so redirect and images work for all downloaded games
+  const downloadedGames = allDownloadedGames.map((game) => {
+    const goalsList = game.goals || [];
+    const completedGoalsCount = goalsList.filter(g => g.completed === true || g.status === "completed").length || 0;
+    const totalGoals = goalsList.length || 0;
+    // Coins: same as LevelsSection — sum of completed goals' amount/points
+    const earnedAmount = Number(
+      goalsList
+        .filter(g => g.completed === true || g.status === "completed")
+        .reduce((sum, goal) => sum + (parseFloat(goal.amount || goal.points) || 0), 0)
+    ) || 0;
+    // XP: same formula as LevelsSection — per completed goal using xpRewardConfig (baseXP * multiplier^index)
+    const xpConfig = game?.xpRewardConfig || game?.bitlabsRawData?.xpRewardConfig || game?.besitosRawData?.xpRewardConfig || { baseXP: 1, multiplier: 1 };
+    const baseXP = Math.max(1, Number(xpConfig.baseXP) || 1);
+    const multiplier = Number(xpConfig.multiplier) || 1;
+    const totalXP = goalsList.reduce((sum, goal, index) => {
+      const isCompleted = goal.completed === true || goal.completed === "true" || goal.status === "completed";
+      if (!isCompleted) return sum;
+      const calculatedXP = Math.round((baseXP * Math.pow(multiplier, index)) * 100) / 100;
+      return sum + calculatedXP;
+    }, 0);
     const category = game.categories?.[0]?.name || "Game";
+
+    // Provider id for game details page / get-game-by-id (same as UI sections)
+    const providerId = game.gameId || game.details?.id || game.id;
+    // Image fallbacks for both Besitos and BitLabs AI (icon, creatives, details, etc.)
+    const cardImage =
+      game.square_image ||
+      game.large_image ||
+      game.image ||
+      game.icon ||
+      game.icon_url ||
+      game.images?.icon ||
+      game.images?.banner ||
+      game.creatives?.icon ||
+      game.details?.image ||
+      game.details?.square_image ||
+      game.besitosRawData?.icon ||
+      game.besitosRawData?.icon_url;
+    const cardBg =
+      game.large_image ||
+      game.image ||
+      game.square_image ||
+      game.icon ||
+      game.icon_url ||
+      game.images?.banner ||
+      game.images?.large_image ||
+      game.details?.large_image ||
+      game.details?.image;
+
     return {
-      id: game.id,
-      name: game.title,
+      id: providerId,
+      name: game.title || game.name,
       genre: category,
       subtitle: `${completedGoalsCount} of ${totalGoals} completed`,
-      image: game.square_image || game.large_image || game.image,
-      overlayImage: game.image || game.square_image,
-      score: earnedAmount.toFixed(2),
-      bonus: `+${xpBonus}`,
+      image: cardImage,
+      overlayImage: cardImage || game.image || game.square_image,
+      score: Number.isFinite(earnedAmount) ? earnedAmount.toFixed(2) : "0.00",
+      bonus: `+${totalXP}`,
       coinIcon: "/dollor.png",
       picIcon: "/xp.svg",
       hasStatusDot: true,
-      backgroundImage: game.large_image || game.image,
-      isGradientBg: !game.square_image,
+      backgroundImage: cardBg,
+      isGradientBg: !cardImage,
       fullData: game,
+      source: game.source || "besitos",
     };
-  });
+  }).filter((card) => card.name); // Don't show cards with no name (avoids default "(Game)" when no real data from Bitlab/Besitos)
 
-  // Navigation
+  // Navigation (same provider id + gameId param as other sections so details page and refresh work)
   const handleDownloadedGameClick = (game) => {
     if (game && game.fullData) {
-      // For downloaded games, we use localStorage (not API), so clear Redux state
       dispatch({ type: 'games/clearCurrentGameDetails' });
 
-      // Store game data in localStorage for immediate access
-      localStorage.setItem('selectedGameData', JSON.stringify(game.fullData));
-      router.push(`/gamedetails?id=${game.id}`);
+      const fullData = game.fullData;
+      // Ensure details page can recognize BitLabs AI for images/goals when loading from localStorage
+      const toStore =
+        fullData.source === 'bitlabs_ai' && !fullData.sdkProvider
+          ? { ...fullData, sdkProvider: 'bitlab' }
+          : fullData;
+
+      try {
+        localStorage.setItem('selectedGameData', JSON.stringify(toStore));
+      } catch (_) { }
+
+      const gameId = fullData.gameId || fullData.details?.id || fullData.id || game.id;
+      router.push(`/gamedetails?gameId=${gameId}`);
     }
   };
 
@@ -250,8 +341,6 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
 
   return (
     <div className={`flex flex-col w-full items-start gap-8 relative px-5 ${showSearch ? 'top-[180px]' : 'top-[96px]'}`}>
-      <p className="text-white text-[16px] font-light">Track your progress and complete game challenges to earn reward</p>
-
       {/* ==================== DOWNLOADED GAMES SECTION ==================== */}
       <div className="flex flex-col items-start gap-2.5 relative self-stretch w-full flex-[0_0_auto] max-w-sm mx-auto">
         <div className="flex flex-col w-full items-start gap-4 relative flex-[0_0_auto]">
@@ -313,7 +402,7 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
       <WatchAdCard xpAmount={5} />
 
       <div className="-mt-6">
-        <NonGameOffersSection />
+        <NonGameOffersSection skipFetch />
       </div>
 
 

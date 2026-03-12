@@ -1,16 +1,20 @@
-import React, { useState, useEffect } from "react";
-import { useDispatch } from "react-redux";
+import React, { useState, useEffect, useMemo } from "react";
+import { useDispatch, useSelector } from "react-redux";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../../../contexts/AuthContext";
+import { Capacitor } from "@capacitor/core";
 import {
     selectGame,
     startTodayChallenge,
     completeTodayChallenge,
     fetchCalendar,
-    fetchToday
+    fetchToday,
+    fetchBonusDays
 } from "../../../lib/redux/slice/dailyChallengeSlice";
 import { SimpleSpinWheel } from "./SimpleSpinWheel";
 import { spinForChallenge } from "../../../lib/api";
+import { useAppLovinAds } from "@/hooks/useAppLovinAds";
+import MockAdOverlay from "@/app/games/components/MockAdOverlay";
 
 export const ChallengeModal = ({
     isOpen,
@@ -33,6 +37,183 @@ export const ChallengeModal = ({
     const [timeLimitCountdown, setTimeLimitCountdown] = useState(null);
     const [showCompletionSuccess, setShowCompletionSuccess] = useState(false);
     const [spinSuccess, setSpinSuccess] = useState(false);
+    // Local error state for completion/claim handlers (prevents setError is not defined)
+    const [error, setError] = useState(null);
+    const [isShowingAdForClaim, setIsShowingAdForClaim] = useState(false);
+    const isWeb = !Capacitor.isNativePlatform();
+    const [showMockAd, setShowMockAd] = useState(false);
+
+    // VIP status from Redux (same pattern as SpinWheel and VipBanner)
+    const vipStatus = useSelector((state) => state.profile.vipStatus);
+    const vipData = useMemo(() => {
+        const isVipActive = vipStatus?.data?.isActive && vipStatus?.data?.currentTier && vipStatus?.data?.currentTier !== "Free";
+        const currentTier = vipStatus?.data?.currentTier;
+
+        return {
+            isVipActive,
+            currentTier
+        };
+    }, [vipStatus]);
+
+    const getEffectiveToken = () => token || localStorage.getItem('authToken');
+
+    const runRewardedAdGateIfManual = async (contextLabel = "complete") => {
+        const claimType = today?.challenge?.claimType || today?.challenge?.claim_type;
+        const isManualClaim = claimType === "manual";
+        console.log("[ChallengeModal] 🔐 Ad gate check:", { contextLabel, claimType, isManualClaim, isVipActive: vipData.isVipActive, currentTier: vipData.currentTier });
+
+        if (!isManualClaim) return true;
+
+        // VIP users get ad-free reward claiming
+        if (vipData.isVipActive) {
+            console.log("[ChallengeModal] 🎯 VIP user detected - skipping ads for reward claiming");
+            return true;
+        }
+
+        // Block until ad finishes (or fails)
+        setIsShowingAdForClaim(true);
+        setError(null);
+        clearAdError();
+
+        console.log(`[ChallengeModal] 🎬 Manual claim: loading ad before ${contextLabel}...`);
+        const loaded = await loadAd();
+        console.log(`[ChallengeModal] 📊 loadAd() result (${contextLabel}):`, loaded);
+        if (!loaded) {
+            setIsShowingAdForClaim(false);
+            return false;
+        }
+
+        console.log(`[ChallengeModal] 🎬 Manual claim: showing ad before ${contextLabel}...`);
+        const adReward = await showAd({
+            onReward: (rewardData) => {
+                console.log(`[ChallengeModal] 💰 Rewarded ad completed before ${contextLabel}:`, rewardData);
+            },
+            onError: (errorMsg) => {
+                console.error(`[ChallengeModal] ❌ Rewarded ad error before ${contextLabel}:`, errorMsg);
+                setError(errorMsg || "Failed to show ad. Please try again.");
+            },
+        });
+        console.log(`[ChallengeModal] 📊 showAd() result (${contextLabel}):`, adReward);
+
+        setIsShowingAdForClaim(false);
+        return !!adReward;
+    };
+
+    const completeChallengeFlow = async ({ auto = false } = {}) => {
+        if (isCompleting) {
+            console.log("[ChallengeModal] ⏭️ completeChallengeFlow skipped: already completing");
+            return;
+        }
+
+        const effectiveToken = getEffectiveToken();
+        console.log("[ChallengeModal] ▶ completeChallengeFlow()", {
+            auto,
+            effectiveTokenPresent: !!effectiveToken,
+            type: today?.challenge?.type,
+            claimType: today?.challenge?.claimType || today?.challenge?.claim_type,
+        });
+
+        try {
+            setIsCompleting(true);
+            setError(null);
+
+            // For spin challenges, ensure spin was successful (skip check when auto=true — we're only called with auto after a successful spin)
+            if (today?.challenge?.type === "spin" && !auto && !spinSuccess) {
+                alert("Please spin the wheel successfully before marking as complete.");
+                setIsCompleting(false);
+                return;
+            }
+
+            // IMPORTANT: For manual claim, FORCE ad first, and do not proceed unless ad completes
+            const adOk = await runRewardedAdGateIfManual("complete");
+            if (!adOk) {
+                console.warn("[ChallengeModal] ⚠️ Manual claim ad not completed; skipping complete API");
+                setIsCompleting(false);
+                return;
+            }
+
+            console.log("[ChallengeModal] 🌐 Dispatching completeTodayChallenge...");
+            const result = await dispatch(
+                completeTodayChallenge({
+                    challengeId: today?.challenge?.id,
+                    token: effectiveToken,
+                })
+            );
+            console.log("[ChallengeModal] 📥 completeTodayChallenge result:", result);
+
+            if (!result.type.includes("fulfilled")) {
+                const errorMessage =
+                    result.payload || result.error || "Failed to complete challenge. Please try again.";
+                alert(errorMessage);
+                return;
+            }
+
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = now.getMonth();
+
+            await Promise.all([
+                dispatch(fetchCalendar({ year, month, token: effectiveToken, force: true })),
+                dispatch(fetchToday({ token: effectiveToken, force: true })),
+                dispatch(fetchBonusDays({ token: effectiveToken, force: true })),
+            ]);
+
+            setShowCompletionSuccess(true);
+        } catch (e) {
+            const errorMessage =
+                e?.message || e?.payload || e?.error || "An unexpected error occurred. Please try again.";
+            console.error("[ChallengeModal] ❌ completeChallengeFlow error:", e);
+            alert(errorMessage);
+        } finally {
+            setIsCompleting(false);
+        }
+    };
+
+    // AppLovin MAX rewarded ads hook (shared with WatchAdCard / SpinWheel)
+    const {
+        isInitialized,
+        isLoading: isAdLoading,
+        isAdReady,
+        isShowingAd,
+        error: adError,
+        showAd,
+        loadAd,
+        clearError: clearAdError,
+    } = useAppLovinAds();
+
+    // Sync ad error to local error if needed
+    useEffect(() => {
+        if (adError) {
+            setError(adError);
+        }
+    }, [adError]);
+
+    // Log platform info once for debugging native vs web behavior
+    useEffect(() => {
+        console.log("[ChallengeModal] 🧩 Platform debug:", {
+            isWeb,
+            isNativePlatform: Capacitor.isNativePlatform?.(),
+        });
+    }, [isWeb]);
+
+    // Sync AppLovin ad showing state with mock overlay on web
+    useEffect(() => {
+        if (isWeb && isShowingAd) {
+            setShowMockAd(true);
+        } else if (isWeb && !isShowingAd && showMockAd) {
+            setShowMockAd(false);
+        }
+    }, [isWeb, isShowingAd, showMockAd]);
+
+    const handleMockAdComplete = () => {
+        setShowMockAd(false);
+    };
+
+    const handleMockAdClose = () => {
+        setShowMockAd(false);
+        setError("Ad was closed. Please watch the full ad to claim rewards.");
+        setTimeout(() => setError(null), 5000);
+    };
 
     // Modal state changes tracked internally
 
@@ -198,6 +379,20 @@ export const ChallengeModal = ({
         return () => clearInterval(interval);
     }, [today?.progress?.isCompleted, today?.progress?.startedAt, today?.countdown?.serverTime, today?.challenge?.type]);
 
+    // User already completed today's challenge and claimed (or nothing left to do) – show message only, no buttons (must be before any early return to satisfy rules of hooks)
+    const alreadyCompletedNoActions = useMemo(() => {
+        if (!today?.progress?.isCompleted) return false;
+        const rewardTransferred = today?.progress?.rewardTransferred === true || today?.rewardTransferred === true;
+        const noActionsLeft = !today?.actions?.canClaimRewards && !today?.actions?.canComplete && !today?.actions?.canPlay && !today?.actions?.canSpin;
+        if (rewardTransferred) return true;
+        if (!noActionsLeft) return false;
+        if (today?.challenge?.type !== 'spin' && today?.progress?.startedAt && today?.countdown?.serverTime) {
+            const elapsed = new Date(today.countdown.serverTime) - new Date(today.progress.startedAt);
+            if (elapsed < 10 * 60 * 1000) return false;
+        }
+        return true;
+    }, [today?.progress?.isCompleted, today?.progress?.rewardTransferred, today?.progress?.startedAt, today?.rewardTransferred, today?.countdown?.serverTime, today?.challenge?.type, today?.actions?.canClaimRewards, today?.actions?.canComplete, today?.actions?.canPlay, today?.actions?.canSpin]);
+
     if (!isOpen) return null;
 
     // Handle case when no challenge is available
@@ -290,60 +485,17 @@ export const ChallengeModal = ({
     };
 
     const handleCompleteChallenge = async () => {
-        try {
-            setIsCompleting(true);
-            setError(null);
-
-            // For spin challenges, check if spin was successful before completing
-            if (today?.challenge?.type === 'spin') {
-                if (!spinSuccess) {
-                    alert("Please spin the wheel successfully before marking as complete.");
-                    setIsCompleting(false);
-                    return;
-                }
-            }
-
-            // Step 1: Wait for completion API call to finish completely
-            const result = await dispatch(completeTodayChallenge({
-                conversionId: today?.conversionId,
-                token: token
-            }));
-
-            // Check if completion API call was successful
-            if (!result.type.includes('fulfilled')) {
-                // If completion failed, show error and stop
-                const errorMessage = result.payload || result.error || "Failed to complete challenge. Please try again.";
-                alert(errorMessage);
-                setIsCompleting(false);
-                return;
-            }
-
-            // Step 2: Wait for all data refresh calls to complete before showing success
-            // This ensures the UI has the latest data before redirecting or showing success
-            const now = new Date();
-            const year = now.getFullYear();
-            const month = now.getMonth();
-
-            // Wait for both refresh calls to complete - DO NOT proceed until they finish
-            await Promise.all([
-                dispatch(fetchCalendar({ year, month, token, force: true })),
-                dispatch(fetchToday({ token, force: true }))
-            ]);
-
-            // Only show success message after ALL API calls are complete and data is refreshed
-            // This ensures data is fully updated before user sees success message
-            setShowCompletionSuccess(true);
-            setIsCompleting(false); // Re-enable interactions after everything is complete
-        } catch (error) {
-            // Handle any unexpected errors
-            const errorMessage = error?.message || error?.payload || error?.error || "An unexpected error occurred. Please try again.";
-            alert(errorMessage);
-            setIsCompleting(false);
-        }
+        // Wrapper around the single source-of-truth completion flow
+        await completeChallengeFlow({ auto: false });
     };
 
-    // Handle claim rewards - with time-based validation
+    // Handle claim rewards - with time-based validation (no ad here; ad is now on complete for manual claims)
     const handleClaimRewards = async () => {
+        console.log("[ChallengeModal] ▶ handleClaimRewards() called", {
+            isCompleted: today?.progress?.isCompleted,
+            startedAt: today?.progress?.startedAt,
+            canClaimRewards: today?.actions?.canClaimRewards,
+        });
 
         // VALIDATION: Check if challenge is completed
         if (!today?.progress?.isCompleted) {
@@ -375,29 +527,37 @@ export const ChallengeModal = ({
 
         try {
             setIsClaiming(true);
+            setError(null);
+            clearAdError();
 
             // Use completeChallenge to claim rewards (it handles both completion and claiming)
+            console.log("[ChallengeModal] 🌐 Dispatching completeTodayChallenge for claim...");
             const result = await dispatch(completeTodayChallenge({
-                conversionId: today?.conversionId,
+                challengeId: today?.challenge?.id,
                 token: token
             }));
+            console.log("[ChallengeModal] 📥 completeTodayChallenge result (claim):", result);
 
             // Check if claim was successful
             if (result.type.includes('fulfilled')) {
-                // Refresh calendar and today's data
                 const now = new Date();
                 const year = now.getFullYear();
                 const month = now.getMonth();
-                await dispatch(fetchCalendar({ year, month, token }));
-                await dispatch(fetchToday({ token }));
+                await Promise.all([
+                    dispatch(fetchCalendar({ year, month, token, force: true })),
+                    dispatch(fetchToday({ token, force: true })),
+                    dispatch(fetchBonusDays({ token, force: true })),
+                ]);
             }
 
             onClose();
         } catch (error) {
             // Failed to claim rewards
+            console.error("[ChallengeModal] ❌ Error while claiming rewards:", error);
             alert("Failed to claim rewards. Please try again.");
         } finally {
             setIsClaiming(false);
+            setIsShowingAdForClaim(false);
         }
     };
 
@@ -442,6 +602,16 @@ export const ChallengeModal = ({
 
     return (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            {/* Web-only mock overlay (native uses real fullscreen ads) */}
+            {isWeb && (
+                <MockAdOverlay
+                    isVisible={showMockAd}
+                    onComplete={handleMockAdComplete}
+                    onClose={handleMockAdClose}
+                    duration={15}
+                />
+            )}
+
             <div className="bg-gray-900 rounded-lg p-6 w-full max-w-sm border border-gray-700 max-h-[90vh] overflow-y-auto">
                 {/* Header */}
                 <div className="flex justify-between items-center mb-4">
@@ -602,53 +772,17 @@ export const ChallengeModal = ({
 
                                     if (spinWasSuccessful) {
                                         setSpinSuccess(true);
-                                        // For spin challenges, start the challenge but don't open the game URL
+                                        // For spin challenges, start the challenge but don't auto-complete — let user click "Mark as Complete"
                                         try {
                                             setIsStarting(true);
                                             const result = await dispatch(startTodayChallenge({ token: localStorage.getItem('authToken') }));
 
                                             if (result.type.includes('fulfilled')) {
                                                 setChallengeStartTime(new Date());
-                                                // Force refresh to get updated status after spin
+                                                // Force refresh so "Mark as Complete" button appears
                                                 await dispatch(fetchToday({ token: localStorage.getItem('authToken'), force: true }));
-
-                                                // For spin challenges, automatically mark as complete after successful spin
-                                                // This ensures the UI updates immediately to show completion status
-                                                try {
-                                                    const completeResult = await dispatch(completeTodayChallenge({
-                                                        conversionId: today?.conversionId,
-                                                        token: localStorage.getItem('authToken')
-                                                    }));
-
-                                                    // Wait for completion API to finish completely before proceeding
-                                                    if (completeResult.type.includes('fulfilled')) {
-                                                        // Wait for ALL refresh calls to complete before updating UI
-                                                        // This ensures data is fully updated before user sees completion
-                                                        const now = new Date();
-                                                        const year = now.getFullYear();
-                                                        const month = now.getMonth();
-
-                                                        await Promise.all([
-                                                            dispatch(fetchToday({ token: localStorage.getItem('authToken'), force: true })),
-                                                            dispatch(fetchCalendar({
-                                                                year,
-                                                                month,
-                                                                token: localStorage.getItem('authToken'),
-                                                                force: true
-                                                            }))
-                                                        ]);
-
-                                                        // Only show success after ALL API calls complete
-                                                        setShowCompletionSuccess(true);
-                                                    } else {
-                                                        // If completion failed, show error
-                                                        const errorMessage = completeResult.payload || completeResult.error || "Failed to complete challenge. Please try again.";
-                                                        alert(errorMessage);
-                                                    }
-                                                } catch (completeError) {
-                                                    // Handle auto-completion error
-                                                    alert("Failed to complete challenge. Please try again.");
-                                                }
+                                                // Do NOT auto-call completeChallengeFlow — user must click "Mark as Complete"
+                                                // so they can watch the ad (if required) and then complete.
                                             }
                                         } catch (error) {
                                             // Failed to start challenge
@@ -772,17 +906,33 @@ export const ChallengeModal = ({
                     </div>
                 )}
 
+                {/* Already completed today – friendly message only, no buttons */}
+                {!showCompletionSuccess && alreadyCompletedNoActions && (
+                    <div className="mt-4 p-4 bg-green-500/20 border border-green-500/40 rounded-lg">
+                        <p className="text-green-200 text-center text-sm font-medium">
+                            You’ve already completed today’s challenge. Great job! Come back tomorrow for a new one.
+                        </p>
+                    </div>
+                )}
+
                 {/* Action Buttons - Flow: Start → Mark as Complete → Claim Rewards */}
-                {!showCompletionSuccess && (
+                {!showCompletionSuccess && !alreadyCompletedNoActions && (
                     <div className="flex gap-3 mt-4">
-                        {/* Step 1: Claim Rewards (if completed and 10 minutes passed) */}
-                        {canClaimRewardsNow() ? (
+                        {/* Step 1: Claim Rewards (if completed and 10 minutes passed) – hide when user already claimed */}
+                        {canClaimRewardsNow() && !today?.progress?.rewardTransferred && !today?.rewardTransferred ? (
                             <button
                                 onClick={isClaiming ? undefined : handleClaimRewards}
-                                disabled={isClaiming}
-                                className={`flex-1 py-3 text-white rounded-lg font-medium transition-colors ${isClaiming ? 'bg-green-500 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+                                disabled={isClaiming || isShowingAdForClaim}
+                                className={`flex-1 py-3 text-white rounded-lg font-medium transition-colors ${isClaiming || isShowingAdForClaim
+                                    ? 'bg-green-500 cursor-not-allowed'
+                                    : 'bg-green-600 hover:bg-green-700'
+                                    }`}
                             >
-                                {isClaiming ? 'Claiming Rewards...' : '🎁 Claim Rewards'}
+                                {isShowingAdForClaim
+                                    ? 'Watching Ad...'
+                                    : isClaiming
+                                        ? 'Claiming Rewards...'
+                                        : '🎁 Claim Rewards'}
                             </button>
                         ) : today?.progress?.isCompleted && today?.progress?.startedAt && timeUntilClaimable && today?.challenge?.type !== 'spin' ? (
                             <button

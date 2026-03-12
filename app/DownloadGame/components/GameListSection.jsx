@@ -7,7 +7,6 @@ import { fetchUserData, fetchGamesBySection, loadUserDataFromCache } from "@/lib
 import { useAuth } from "@/contexts/AuthContext";
 import GameItemCard from "./GameItemCard";
 import WatchAdCard from "./WatchAdCard";
-import { filterIosTitleGames } from "@/lib/utils/gameFilters";
 // Removed getAgeGroupFromProfile and getGenderFromProfile - now passing user object directly
 
 // Static data for non-gaming offers carousel
@@ -80,18 +79,67 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
     setIsFromFeatured(false);
   };
 
-  // Get user ID from localStorage
+  // Get user ID from localStorage - with better fallback logic
   const getUserId = () => {
     try {
       const userData = localStorage.getItem('user');
       if (userData) {
         const user = JSON.parse(userData);
-        return user._id || user.id;
+        const userId = user._id || user.id || user.userId;
+        if (userId) {
+          return userId;
+        }
+      }
+      // Fallback: try other localStorage keys
+      const userId = localStorage.getItem('userId') ||
+        localStorage.getItem('user_id') ||
+        localStorage.getItem('id');
+      if (userId) {
+        return userId;
       }
     } catch (error) {
-      // Error getting user ID from localStorage
+      console.error('❌ [GameListSection] Error getting user ID:', error);
     }
+    console.warn('⚠️ [GameListSection] No user ID found in localStorage');
     return null;
+  };
+
+  // Helper function to add user ID to redirect URL
+  const addUserIdToRedirectUrl = (url, userId) => {
+    if (!url || !userId) {
+      console.warn('⚠️ [GameListSection] Cannot add user ID: missing url or userId', { url: !!url, userId: !!userId });
+      return url;
+    }
+
+    try {
+      const urlObj = new URL(url);
+      const existingParam = urlObj.searchParams.get('partner_user_id');
+
+      // Check if partner_user_id exists and has a value
+      if (existingParam && existingParam.trim() !== '') {
+        return url; // Already has user ID with value
+      }
+
+      // If parameter exists but is empty, or doesn't exist, set it
+      urlObj.searchParams.set("partner_user_id", userId);
+      const finalUrl = urlObj.toString();
+      return finalUrl;
+    } catch (error) {
+      console.error('❌ [GameListSection] URL parsing failed, using fallback:', error);
+      // If URL parsing fails, try to append/replace as query string
+      // Remove existing empty partner_user_id if present
+      let cleanUrl = url;
+      if (url.includes('partner_user_id=')) {
+        // Remove existing empty parameter
+        cleanUrl = url.replace(/[?&]partner_user_id=[^&]*/g, '');
+        // Clean up any double ? or & at the start
+        cleanUrl = cleanUrl.replace(/^([^?]*)\?+/, '$1?').replace(/^([^?]*)\&+/, '$1&');
+      }
+
+      const separator = cleanUrl.includes("?") ? "&" : "?";
+      const finalUrl = `${cleanUrl}${separator}partner_user_id=${userId}`;
+      return finalUrl;
+    }
   };
 
   // Fetch games from new API for "Most Played" section
@@ -212,35 +260,59 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
     return () => clearTimeout(refreshTimer);
   }, [dispatch, token]);
 
-  // Process games from new API into the same format - using besitosRawData
+  // Process games from new API into the same format - using normalizer for both besitos and bitlab
   const processNewApiGames = (games) => {
+    const { normalizeGameImages, normalizeGameTitle, normalizeGameCategory, normalizeGameAmount, normalizeGameUrl } = require('@/lib/gameDataNormalizer');
+    const userId = getUserId();
+
     return games.map((game, index) => {
-      // Use besitosRawData if available, otherwise fallback to existing structure
-      const rawData = game.besitosRawData || {};
+      // Normalize game data for both besitos and bitlab
+      const images = normalizeGameImages(game);
+      const title = normalizeGameTitle(game);
+      const category = normalizeGameCategory(game);
+      const amount = normalizeGameAmount(game);
+      const coinVal = game.rewards?.coins ?? game.rewards?.gold ?? amount;
+      const raw = typeof coinVal === 'number' ? coinVal : (typeof coinVal === 'string' ? parseFloat(String(coinVal).replace('$', '')) || 0 : 0);
+      const displayCoins = Number.isFinite(raw) ? (raw === Math.round(raw) ? Math.round(raw) : Math.round(raw * 100) / 100) : 0;
+      let url = normalizeGameUrl(game) || game.details?.downloadUrl;
+
+      // Add user ID to redirect URL if it exists
+      if (url && userId) {
+        url = addUserIdToRedirectUrl(url, userId);
+        // Also update the URL in the game object for consistency
+        if (game.besitosRawData?.url) {
+          game.besitosRawData.url = url;
+        }
+        if (game.url) {
+          game.url = url;
+        }
+        if (game.details?.downloadUrl) {
+          game.details.downloadUrl = url;
+        }
+      }
 
       // Clean game name - remove platform suffix after "-"
-      const cleanGameName = (rawData.title || game.details?.name || game.name || game.title || "Game").split(' - ')[0].trim();
+      const cleanGameName = title.split(' - ')[0].trim();
 
       return {
-        id: game._id || game.id || game.gameId,
+        id: game.gameId || game.details?.id || game._id || game.id,
         name: cleanGameName,
-        genre: rawData.categories?.[0]?.name || game.details?.category || "Game",
+        genre: category,
         subtitle: "Available to Download",
-        // Use besitosRawData images first
-        image: rawData.square_image || rawData.image || game.images?.banner || game.images?.large_image || game.details?.square_image || game.details?.image || "/placeholder-game.png",
-        overlayImage: rawData.image || rawData.square_image || game.details?.image || game.details?.square_image,
-        // Use besitosRawData amount first, then rewards
-        amount: rawData.amount ? `$${rawData.amount}` : (game.rewards?.coins ? `$${game.rewards.coins}` : "$50"),
-        score: rawData.amount || game.rewards?.coins || game.amount || "50",
-        bonus: game.rewards?.xp || game.xpRewardConfig?.baseXP || "100",
+        // Use normalized images
+        image: images.square_image || images.icon || game.images?.banner || game.images?.large_image || game.details?.square_image || game.details?.image || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png",
+        overlayImage: images.icon || images.square_image || game.details?.image || game.details?.square_image,
+        amount: displayCoins ? `$${displayCoins}` : "$0",
+        score: String(displayCoins),
+        bonus: game.rewards?.xp ?? game.xpRewardConfig?.baseXP ?? "0",
         coinIcon: "/dollor.png",
         picIcon: "/xp.svg",
         hasStatusDot: false,
-        // Use besitosRawData large_image for background
-        backgroundImage: rawData.large_image || rawData.image || game.images?.banner || game.details?.large_image || game.details?.image,
-        isGradientBg: !rawData.square_image && !game.details?.square_image,
-        downloadUrl: rawData.url || game.details?.downloadUrl,
-        // Store full game data including besitosRawData
+        // Use normalized images for background
+        backgroundImage: images.large_image || images.banner || images.icon || game.images?.banner || game.details?.large_image || game.details?.image,
+        isGradientBg: !images.square_image && !game.details?.square_image,
+        downloadUrl: url,
+        // Store full game data including besitosRawData (with updated URL)
         fullData: game,
         isNewApi: true,
       };
@@ -249,28 +321,46 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
 
   // Process featured games from MostPlayedGames into the same format
   const processFeaturedGames = (games) => {
+    const userId = getUserId();
+
     return games.map((game, index) => {
       // Clean game name - remove platform suffix after "-"
       const cleanGameName = (game.name || game.title || "Game").split(' - ')[0].trim();
 
+      // Get download URL and add user ID if it exists
+      let downloadUrl = game.downloadUrl || game.redirectUrl;
+      if (downloadUrl && userId) {
+        downloadUrl = addUserIdToRedirectUrl(downloadUrl, userId);
+        // Also update the URL in the game object for consistency
+        if (game.downloadUrl) {
+          game.downloadUrl = downloadUrl;
+        }
+        if (game.redirectUrl) {
+          game.redirectUrl = downloadUrl;
+        }
+      }
+
+      const coinVal = game.rewards?.coins ?? game.rewards?.gold ?? game.amount ?? 0;
+      const raw = typeof coinVal === 'number' ? coinVal : (typeof coinVal === 'string' ? parseFloat(String(coinVal).replace('$', '')) || 0 : 0);
+      const displayCoins = Number.isFinite(raw) ? (raw === Math.round(raw) ? String(Math.round(raw)) : (Math.round(raw * 100) / 100).toString()) : "0";
       return {
         id: game.id,
         name: cleanGameName,
         genre: game.categories?.[0]?.name || "Game",
         subtitle: "Available to Download",
-        image: game.square_image || game.image || "/placeholder-game.png",
+        image: game.square_image || game.image || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png",
         overlayImage: game.image || game.square_image,
-        amount: game.amount || "0", // Use the amount field from game data
-        score: game.amount || "0", // Also set score for backward compatibility
-        bonus: "50", // Hardcoded XP as requested
+        amount: displayCoins,
+        score: displayCoins,
+        bonus: game.rewards?.xp ?? "0",
         coinIcon: "/dollor.png",
         picIcon: "/xp.svg",
         hasStatusDot: false, // Featured games don't have active status
         backgroundImage: game.large_image || game.image,
         isGradientBg: !game.square_image,
-        // Download URL from game data
-        downloadUrl: game.downloadUrl || game.redirectUrl,
-        // Store full game data for navigation
+        // Download URL from game data (with user ID added)
+        downloadUrl: downloadUrl,
+        // Store full game data for navigation (with updated URL)
         fullData: game,
         isFeatured: true, // Mark as featured game
       };
@@ -278,7 +368,7 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
   };
 
   // Process in-progress games from Redux into downloadedGames format
-  const downloadedGames = inProgressGames.map((game, index) => {
+  const downloadedGames = (inProgressGames || []).map((game, index) => {
     // Calculate completed goals
     const completedGoalsCount = game.goals?.filter(g => g.completed === true).length || 0;
     const totalGoals = game.goals?.length || 0;
@@ -314,32 +404,74 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
   });
 
   // Handle click on downloaded game - navigate to game details with full data
-  const handleDownloadedGameClick = (game) => {
-    if (game && game.fullData) {
-      // For downloaded games, we use localStorage (not API), so clear Redux state
-      dispatch({ type: 'games/clearCurrentGameDetails' });
+  const handleDownloadedGameClick = (game, e) => {
+    // GameItemCard passes (game, e), so game should always be the first parameter
+    const actualGame = game;
 
-      // Store game data in localStorage for immediate access
-      localStorage.setItem('selectedGameData', JSON.stringify(game.fullData));
-      router.push(`/gamedetails?id=${game.id}`);
+    if (!actualGame) {
+      console.error('❌ [GameListSection] No game provided to handleDownloadedGameClick');
+      return;
+    }
+
+    // Use fullData if available, otherwise use the game object itself
+    const gameData = actualGame.fullData || actualGame;
+
+    if (!gameData) {
+      console.error('❌ [GameListSection] No game data available');
+      return;
+    }
+
+    // For downloaded games, we use localStorage (not API), so clear Redux state
+    dispatch({ type: 'games/clearCurrentGameDetails' });
+
+    // Store game data in localStorage for immediate access
+    try {
+      localStorage.setItem('selectedGameData', JSON.stringify(gameData));
+      // Use provider gameId (BitLabs/Besitos) for get-game-by-id API
+      const gameId = gameData.gameId || gameData.details?.id || actualGame.id || gameData.id || gameData._id;
+      console.log('✅ [GameListSection] Navigating to game details:', gameId);
+      router.push(`/gamedetails?gameId=${gameId}`);
+    } catch (error) {
+      console.error('❌ [GameListSection] Failed to store game data:', error);
     }
   };
 
   // Handle click on featured game - navigate to game details
-  const handleFeaturedGameClick = (game) => {
-    if (game && game.fullData) {
-      // For featured games, we use localStorage (not API), so clear Redux state
-      dispatch({ type: 'games/clearCurrentGameDetails' });
+  const handleFeaturedGameClick = (game, e) => {
+    // GameItemCard passes (game, e), so game should always be the first parameter
+    const actualGame = game;
 
-      // Store full game data including besitosRawData in localStorage for immediate access
-      try {
-        localStorage.setItem('selectedGameData', JSON.stringify(game.fullData));
-      } catch (error) {
-        // Failed to store game data
-      }
+    console.log('🟢 [GameListSection] handleFeaturedGameClick called:', {
+      game: actualGame,
+      hasFullData: !!actualGame?.fullData,
+      gameId: actualGame?.id
+    });
 
-      const gameId = game.id || game.fullData?.gameId || game.fullData?._id;
+    if (!actualGame) {
+      console.error('❌ [GameListSection] No game provided to handleFeaturedGameClick');
+      return;
+    }
+
+    // Use fullData if available, otherwise use the game object itself
+    const gameData = actualGame.fullData || actualGame;
+
+    if (!gameData) {
+      console.error('❌ [GameListSection] No game data available');
+      return;
+    }
+
+    // For featured games, we use localStorage (not API), so clear Redux state
+    dispatch({ type: 'games/clearCurrentGameDetails' });
+
+    // Store full game data including besitosRawData in localStorage for immediate access
+    try {
+      localStorage.setItem('selectedGameData', JSON.stringify(gameData));
+      // Use provider gameId (BitLabs/Besitos) for get-game-by-id API
+      const gameId = gameData.gameId || gameData.details?.id || actualGame.id || gameData.id || gameData._id;
+      console.log('✅ [GameListSection] Navigating to game details:', gameId);
       router.push(`/gamedetails?gameId=${gameId}&source=mostPlayed`);
+    } catch (error) {
+      console.error('❌ [GameListSection] Failed to store game data:', error);
     }
   };
 
@@ -356,16 +488,16 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
   const gamesToShow = React.useMemo(() => {
     // First priority: New API games
     if (mostPlayedGames && mostPlayedGames.length > 0) {
-      return processNewApiGames(filterIosTitleGames(mostPlayedGames));
+      return processNewApiGames(mostPlayedGames);
     }
 
     // Second priority: Featured games from MostPlayedGames
     if (isFromFeatured && featuredGames) {
-      return processFeaturedGames(filterIosTitleGames(featuredGames));
+      return processFeaturedGames(featuredGames);
     }
 
     // Fallback: Downloaded games
-    return filterIosTitleGames(downloadedGames);
+    return downloadedGames;
   }, [mostPlayedGames, isFromFeatured, featuredGames, downloadedGames]);
 
   // Apply search filters to games
@@ -421,7 +553,11 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
                   key={game.id}
                   game={game}
                   isEmpty={false}
-                  onClick={() => handleFeaturedGameClick(game)}
+                  onClick={(clickedGame, e) => {
+                    // GameItemCard passes (game, e), but we already have game captured
+                    // Use the passed game or fallback to captured game
+                    handleFeaturedGameClick(clickedGame || game, e);
+                  }}
                 />
               ))
             ) : (
@@ -442,7 +578,11 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
                   key={game.id}
                   game={game}
                   isEmpty={false}
-                  onClick={() => handleFeaturedGameClick(game)}
+                  onClick={(clickedGame, e) => {
+                    // GameItemCard passes (game, e), but we already have game captured
+                    // Use the passed game or fallback to captured game
+                    handleFeaturedGameClick(clickedGame || game, e);
+                  }}
                 />
               ))
             ) : (
@@ -478,7 +618,11 @@ export const GameListSection = ({ searchQuery = "", showSearch = false }) => {
                   key={game.id}
                   game={game}
                   isEmpty={false}
-                  onClick={() => handleDownloadedGameClick(game)}
+                  onClick={(clickedGame, e) => {
+                    // GameItemCard passes (game, e), but we already have game captured
+                    // Use the passed game or fallback to captured game
+                    handleDownloadedGameClick(clickedGame || game, e);
+                  }}
                 />
               ))
             ) : (

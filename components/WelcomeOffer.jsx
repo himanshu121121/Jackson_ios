@@ -68,41 +68,61 @@ export const WelcomeOffer = () => {
     autoReset: false // Don't auto reset when expired
   });
 
-  // Fetch welcome bonus timer and message from API
+  // Resolve auth token: use context first, then localStorage so the API runs even if context updates slightly later
+  const authToken =
+    token ||
+    (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ||
+    null;
+
+  // Fetch welcome bonus timer and message from API (GET /api/user/game-offers/welcome-bonus-timer)
   useEffect(() => {
     let mounted = true;
+
+    if (!authToken || typeof authToken !== "string" || !authToken.trim()) {
+      setFetchingWelcome(false);
+      return;
+    }
 
     const parseEndTimeFromResponse = (response) => {
       if (!response) return null;
 
-      // ✅ Correct path from API response
       const timer =
         response?.data?.timer ||
         response?.timer;
+      if (!timer || typeof timer !== "object") return null;
 
-      // 1️⃣ Preferred: milliseconds from backend
-      if (typeof timer?.timeUntilUnlock === "number") {
-        return Date.now() + timer.timeUntilUnlock;
+      // Backend says bonus is expired -> show expired state (end time in the past)
+      if (timer.isExpired === true) {
+        return Date.now() - 1000;
       }
 
-      // 2️⃣ Fallback: ISO unlockTime
-      if (timer?.unlockTime) {
+      // Countdown to expiry (completion deadline) – preferred so UI shows "time left to complete"
+      if (typeof timer.timeUntilExpiry === "number" && timer.timeUntilExpiry > 0) {
+        return Date.now() + timer.timeUntilExpiry;
+      }
+      if (timer.completionDeadline) {
+        const t = new Date(timer.completionDeadline).getTime();
+        if (!isNaN(t) && t > Date.now()) return t;
+      }
+
+      // Fallback: countdown to unlock (e.g. before offer is unlocked)
+      if (typeof timer.timeUntilUnlock === "number" && timer.timeUntilUnlock > 0) {
+        return Date.now() + timer.timeUntilUnlock;
+      }
+      if (timer.unlockTime) {
         const t = new Date(timer.unlockTime).getTime();
-        if (!isNaN(t)) return t;
+        if (!isNaN(t) && t > Date.now()) return t;
       }
 
       return null;
     };
 
-
-
     const fetchWelcome = async () => {
       try {
         setFetchingWelcome(true);
-        const data = await getWelcomeBonusTimer(token);
+        const data = await getWelcomeBonusTimer(authToken);
         if (!mounted) return;
 
-        // apiRequest returns an object on network/error with success:false
         if (data && data.success === false) {
           const msg = (data.body && data.body.message) || data.error || '';
           setWelcomeMessage(msg);
@@ -118,7 +138,7 @@ export const WelcomeOffer = () => {
           setServerEndTime(end);
         }
       } catch (error) {
-        // Silently handle fetch errors
+        // Keep UI stable; timer falls back to hook's default/persisted value
       } finally {
         if (mounted) setFetchingWelcome(false);
       }
@@ -129,7 +149,7 @@ export const WelcomeOffer = () => {
     return () => {
       mounted = false;
     };
-  }, [token]);
+  }, [authToken]);
 
   const toggleExpanded = () => {
     setIsExpanded(!isExpanded);

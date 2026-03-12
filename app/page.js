@@ -1,6 +1,7 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import Image from "next/image";
 
 export default function AppLoader() {
   const router = useRouter();
@@ -26,26 +27,78 @@ export default function AppLoader() {
         // Check if this is a new signup (onboarding not complete) or existing user login
         const isNewSignup = !hasCompletedOnboarding;
 
-        if (!permissionsAccepted) {
+        // Use profile fields as ground truth, fall back to localStorage flags
+        const permissionsAcceptedFinal =
+          permissionsAccepted || user.permissionStatus === true;
+        const locationCompletedFinal =
+          locationCompleted ||
+          !!(user.location?.city || user.location?.latitude);
+        const faceVerificationCompletedFinal =
+          faceVerificationCompleted || user.faceVerificationStatus === true;
+
+        // Sync localStorage from profile to prevent future mismatches
+        if (permissionsAcceptedFinal && !permissionsAccepted)
+          localStorage.setItem("permissionsAccepted", "true");
+        if (locationCompletedFinal && !locationCompleted)
+          localStorage.setItem("locationCompleted", "true");
+        if (faceVerificationCompletedFinal && !faceVerificationCompleted)
+          localStorage.setItem("faceVerificationCompleted", "true");
+
+        // For new signups, check if the onboarding questionnaire is complete before
+        // moving on to permissions/location/face-verification
+        if (isNewSignup && onboardingInProgressData) {
+          try {
+            const onboardingState = JSON.parse(onboardingInProgressData);
+            const state = onboardingState?.state;
+
+            if (state) {
+              if (!state.ageRange) {
+                router.replace("/select-age");
+                return;
+              } else if (!state.gender) {
+                router.replace("/select-gender");
+                return;
+              } else if (
+                !state.gamePreferences ||
+                state.gamePreferences.length === 0
+              ) {
+                router.replace("/game-preferences");
+                return;
+              } else if (!state.gameStyle) {
+                router.replace("/game-styles");
+                return;
+              } else if (!state.gameHabit) {
+                router.replace("/player-type");
+                return;
+              }
+              // All questionnaire fields filled — fall through to permissions check
+            }
+          } catch (e) {
+            // Parsing failed — start questionnaire from beginning
+            router.replace("/select-age");
+            return;
+          }
+        }
+
+        if (!permissionsAcceptedFinal) {
           router.replace("/permissions");
-          return; // Stop further execution
+          return;
         }
 
         // Condition 2: Accepted permissions, but has not completed the location step.
-        if (!locationCompleted) {
+        if (!locationCompletedFinal) {
           router.replace("/location");
-          return; // Stop further execution
+          return;
         }
 
         // Condition 3: Only show face verification for NEW SIGNUPS, not for login
-        // Existing users who log in should skip face verification and go directly to homepage
         if (
           isNewSignup &&
-          !faceVerificationCompleted &&
+          !faceVerificationCompletedFinal &&
           !faceVerificationSkipped
         ) {
           router.replace("/face-verification");
-          return; // Stop further execution
+          return;
         }
 
         router.replace("/homepage");
@@ -92,7 +145,15 @@ export default function AppLoader() {
     }
   }, [router]);
 
-  // Industry standard: No loading screen, just redirect immediately
-  // The native splash screen handles the visual feedback
-  return null;
+  return (
+    <div className="fixed inset-0 w-full h-full bg-[#272052]">
+      <Image
+        src="/loadingimage.jpg"
+        alt="Loading"
+        fill
+        className="object-cover"
+        priority
+      />
+    </div>
+  );
 }

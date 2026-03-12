@@ -1,36 +1,169 @@
 "use client";
-import React, { useMemo, useState, useRef, useEffect } from "react";
-import { useSelector } from "react-redux";
+import React, { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { getWelcomeBonusTasks } from "@/lib/api";
 import { WelcomeOffer } from "../../../components/WelcomeOffer";
-import { QuestCard } from "@/components/QuestCard";
+import { QuestCard } from "../../../components/QuestCard";
 
 const WelcomeOfferSection = () => {
-    // OPTIMIZED: Memoize selector to prevent unnecessary re-renders
-    const { inProgressGames, userDataStatus } = useSelector((state) => ({
-        inProgressGames: state.games.inProgressGames,
-        userDataStatus: state.games.userDataStatus
-    }));
+    const { token } = useAuth();
+    const [bonusTasksData, setBonusTasksData] = useState(null);
+    const [error, setError] = useState(null);
     const [currentCardIndex, setCurrentCardIndex] = useState(0);
     const [touchStart, setTouchStart] = useState(null);
     const [touchEnd, setTouchEnd] = useState(null);
     const containerRef = useRef(null);
+    const pollingIntervalRef = useRef(null);
+
+    // Map API response to QuestCard expected format
+    const mapApiResponseToGames = (apiData) => {
+        if (!apiData || !apiData.games) return null;
+
+        const mappedGames = apiData.games.map((game) => {
+            // Map bonusTasks to goals format
+            const goals = game.bonusTasks.map((task) => ({
+                goal_id: task.taskId,
+                text: task.name || task.description || `Task ${task.order}`,
+                title: task.name || task.description || `Task ${task.order}`,
+                completed: task.isCompleted,
+                isUnlocked: task.isUnlocked,
+                order: task.order,
+                isExpired: task.isExpired,
+                completionDeadline: task.completionDeadline,
+                timeRemaining: task.timeRemaining, // in milliseconds from API
+                reward: task.reward,
+                rewardEligible: task.rewardEligible,
+                rewardAwarded: task.rewardAwarded,
+            }));
+
+            return {
+                gameId: game.gameId,
+                title: game.gameTitle,
+                details: {
+                    name: game.gameTitle,
+                },
+                square_image: game.gameImage,
+                image: game.gameImage,
+                // Use first task's completion deadline or calculate from unlock time
+                quest_end_time: game.bonusTasks[0]?.completionDeadline || null,
+                // Default rewards (100 coins + 20 XP per task)
+                coins: 100,
+                xp: 20,
+                goals: goals,
+                // Store original API data for reference
+                _apiData: {
+                    gameStatus: game.gameStatus,
+                    minimumEventThreshold: game.minimumEventThreshold,
+                    completionDeadlineHours: game.completionDeadlineHours,
+                    userProgress: game.userProgress,
+                },
+            };
+        });
+
+        return {
+            games: mappedGames,
+            rewards: apiData.rewards,
+            userBalance: apiData.userBalance,
+        };
+    };
+
+    // Load cached data immediately on mount
+    useEffect(() => {
+        const CACHE_KEY = "welcomeBonusTasks";
+        try {
+            const cached = localStorage.getItem(CACHE_KEY);
+            if (cached) {
+                const cacheData = JSON.parse(cached);
+                const mapped = mapApiResponseToGames(cacheData.data);
+                if (mapped) {
+                    setBonusTasksData(mapped);
+                }
+            }
+        } catch (err) {
+            console.warn("Failed to load cached welcome bonus tasks:", err);
+        }
+    }, []);
+
+    // Fetch welcome bonus tasks from API (background, non-blocking)
+    const fetchBonusTasks = useCallback(async (isBackground = false) => {
+        if (!token) return;
+
+        try {
+            // Don't set loading state for background refreshes
+            if (!isBackground) {
+                setError(null);
+            }
+
+            const response = await getWelcomeBonusTasks(token);
+
+            if (response.success && response.data) {
+                // Cache the response
+                const CACHE_KEY = "welcomeBonusTasks";
+                const cacheData = {
+                    data: response.data,
+                    timestamp: Date.now(),
+                };
+                try {
+                    localStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+                } catch (err) {
+                    console.warn("Failed to cache welcome bonus tasks:", err);
+                }
+
+                // Map and update state
+                const mapped = mapApiResponseToGames(response.data);
+                if (mapped) {
+                    setBonusTasksData(mapped);
+                    setError(null);
+                } else {
+                    setBonusTasksData({ games: [], rewards: null, userBalance: null });
+                }
+            } else {
+                if (!isBackground) {
+                    setError(response.error || "Failed to fetch bonus tasks");
+                }
+                setBonusTasksData(prev => prev || { games: [], rewards: null, userBalance: null });
+            }
+        } catch (err) {
+            console.error("Error fetching welcome bonus tasks:", err);
+            if (!isBackground) {
+                setError(err.message || "Failed to fetch bonus tasks");
+            }
+            setBonusTasksData(prev => prev || { games: [], rewards: null, userBalance: null });
+        }
+    }, [token]);
+
+    // Initial fetch and setup polling
+    useEffect(() => {
+        if (!token) return;
+
+        // Initial fetch (non-blocking, uses cache if available)
+        fetchBonusTasks(false);
+
+        // Set up background polling every 30 seconds to auto-update when tasks complete
+        pollingIntervalRef.current = setInterval(() => {
+            fetchBonusTasks(true); // Background refresh
+        }, 30000); // 30 seconds
+
+        // Cleanup interval on unmount or token change
+        return () => {
+            if (pollingIntervalRef.current) {
+                clearInterval(pollingIntervalRef.current);
+                pollingIntervalRef.current = null;
+            }
+        };
+    }, [token, fetchBonusTasks]);
 
     // OPTIMIZED: Memoize expensive calculations
-    // Check if data is loading - if so, wait a bit before showing WelcomeOffer
-    // This prevents the flash of WelcomeOffer when data is being fetched
     const gameData = useMemo(() => {
-        const hasDownloadedGames = inProgressGames && Array.isArray(inProgressGames) && inProgressGames.length > 0;
-        const allGames = hasDownloadedGames ? inProgressGames : [];
-        // Only show loading if actively loading and no persisted data exists
-        // If we have persisted data (inProgressGames exists), show it immediately
-        const isLoading = userDataStatus === "loading" && !inProgressGames;
+        const hasDownloadedGames = bonusTasksData?.games && Array.isArray(bonusTasksData.games) && bonusTasksData.games.length > 0;
+        const allGames = hasDownloadedGames ? bonusTasksData.games : [];
 
         return {
             hasDownloadedGames,
             allGames,
-            isLoading
+            isLoading: false, // No loading state - show cached data immediately
         };
-    }, [inProgressGames, userDataStatus]);
+    }, [bonusTasksData]);
 
     // Handle touch events for swipe functionality
     const handleTouchStart = (e) => {
@@ -62,6 +195,11 @@ const WelcomeOfferSection = () => {
         setCurrentCardIndex(0);
     }, [gameData.allGames.length]);
 
+    // Show error state if needed (silent, don't block UI)
+    if (error) {
+        console.warn("Welcome bonus tasks error:", error);
+    }
+
     return (
         <div className="flex flex-col items-start gap-4 relative w-full">
             <div className="flex w-full items-center ml-[5.5px] justify-between ">
@@ -72,12 +210,8 @@ const WelcomeOfferSection = () => {
 
             {/* Conditional Rendering with Swipeable Cards */}
             <div className="relative w-full overflow-visible">
-                {/* Wait for data to load before showing WelcomeOffer to prevent flash */}
-                {gameData.isLoading ? (
-                    <div className="w-full h-[245px] flex items-center justify-center">
-                        <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-                    </div>
-                ) : gameData.hasDownloadedGames ? (
+                {/* Show cached data immediately, no loading spinner */}
+                {gameData.hasDownloadedGames ? (
                     <div className="relative">
                         {/* Swipeable Quest Cards */}
                         <div

@@ -1,8 +1,8 @@
 "use client";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Suspense } from "react";
 import Image from "next/image";
 import { useAuth } from "../../contexts/AuthContext";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import LoadingOverlay from "@/components/LoadingOverlay";
 import BiometricLoginButton from "@/components/BiometricLoginButton";
 import Script from "next/script";
@@ -10,13 +10,15 @@ import Script from "next/script";
 import { Capacitor } from "@capacitor/core";
 import { Browser } from "@capacitor/browser";
 
-export default function LoginPage() {
+function LoginPageContent() {
   const [emailOrMobile, setEmailOrMobile] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState({});
+  const [accountStatusError, setAccountStatusError] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { signIn } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [showPassword, setShowPassword] = useState(false)
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [biometricMessage, setBiometricMessage] = useState(null);
@@ -24,6 +26,34 @@ export default function LoginPage() {
   const [isTurnstileLoading, setIsTurnstileLoading] = useState(true);
   const turnstileRef = useRef(null);
   const turnstileWidgetId = useRef(null);
+
+  // Show Google login error passed via query param (from native deep link error flow)
+  // Uses useSearchParams() so it re-runs even when router.replace() navigates to the
+  // same /login route without unmounting this component (e.g. after Google OAuth error)
+  useEffect(() => {
+    const googleError = searchParams.get("googleError");
+    const accountStatus = searchParams.get("accountStatus");
+    console.log("🔑 [LoginPage] searchParams changed →", { googleError, accountStatus });
+
+    if (googleError) {
+      const decoded = decodeURIComponent(googleError);
+      console.log("🔑 [LoginPage] googleError found → decoded:", decoded);
+      setError({ form: decoded });
+    } else {
+      console.log("🔑 [LoginPage] No googleError in searchParams");
+    }
+
+    if (accountStatus) {
+      console.log("🔑 [LoginPage] accountStatus found:", accountStatus);
+      setAccountStatusError(accountStatus);
+    }
+
+    if (googleError || accountStatus) {
+      // Clean the URL so error doesn't persist on refresh
+      window.history.replaceState({}, "", "/login");
+      console.log("🔑 [LoginPage] URL cleaned to /login");
+    }
+  }, [searchParams]);
 
   // Prevent overscroll behavior on mobile and hide scrollbars
   useEffect(() => {
@@ -103,7 +133,10 @@ export default function LoginPage() {
           // Manually render the widget
           setIsTurnstileLoading(true);
           const widgetId = window.turnstile.render(turnstileRef.current, {
-            sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+            sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || (() => {
+              console.warn("⚠️ [Turnstile] NEXT_PUBLIC_TURNSTILE_SITE_KEY is not set. Please add it to your .env file.");
+              return '1x00000000000000000000AA'; // Test key - replace with production key
+            })(),
             callback: (token) => {
               setTurnstileToken(token);
               setIsTurnstileLoading(false);
@@ -234,24 +267,46 @@ export default function LoginPage() {
     setError({});
     setIsSubmitting(true);
 
+    // Check if this login is for Face ID registration (BEST PRACTICE: Handle redirect after login)
+    const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const autoRegister = searchParams?.get('autoRegister') === 'true';
+
     try {
       const result = await signIn(emailOrMobile, password, turnstileToken);
 
       if (result?.ok) {
-        router.push("/homepage");
+        // Wait 16 s so all prefetch API calls in handleAuthSuccess finish loading
+        // before navigating — homepage arrives with data ready, no loading states.
+        // Safety check: only redirect if the user hasn't navigated to another screen.
+        setTimeout(() => {
+          if (autoRegister) {
+            router.push("/face-verification?autoRegister=true");
+          } else {
+            const currentPath =
+              typeof window !== "undefined" ? window.location.pathname : "";
+            if (currentPath === "/login" || currentPath === "/homepage") {
+              router.push("/homepage");
+            }
+          }
+        }, 16000);
       }
       else {
         const backendError = result?.error;
-        if (backendError && backendError.errors) {
+        if (typeof backendError === "string") {
+          setError({ form: backendError });
+        } else if (backendError && Array.isArray(backendError.errors)) {
           const newErrors = {};
-          backendError.errors.forEach(err => {
-            if (err.param) newErrors[err.param] = err.msg;
+          backendError.errors.forEach((err) => {
+            if (err.param && err.msg) newErrors[err.param] = err.msg;
           });
-          setError(newErrors);
-        }
-        else {
-          const errorMessage = backendError?.error || backendError?.message || "An unknown error occurred. Please try again.";
-          setError({ form: errorMessage });
+          if (Object.keys(newErrors).length > 0) setError(newErrors);
+          else {
+            const msg = backendError?.error || backendError?.message;
+            if (msg) setError({ form: msg });
+          }
+        } else {
+          const errorMessage = backendError?.error || backendError?.message;
+          setError({ form: errorMessage || "Something went wrong." });
         }
         // Reset Turnstile on error so user can try again
         resetTurnstileWidget();
@@ -259,7 +314,13 @@ export default function LoginPage() {
       }
     } catch (err) {
       console.error("Login component error:", err);
-      setError({ form: "A client-side error occurred. Please try again." });
+      const msg =
+        err?.message ||
+        err?.body?.message ||
+        err?.body?.error ||
+        (Array.isArray(err?.body?.errors) && err.body.errors[0]?.msg) ||
+        null;
+      setError({ form: msg || "Something went wrong." });
       // Reset Turnstile on error so user can try again
       resetTurnstileWidget();
       setTurnstileToken(null);
@@ -372,11 +433,27 @@ export default function LoginPage() {
 
   const handleBiometricSuccess = () => {
     setBiometricMessage(null);
-    router.push("/homepage");
+    // Small delay to ensure walletScreen data is loaded before navigation
+    setTimeout(() => {
+      router.push("/homepage");
+    }, 2);
   };
 
-  const handleBiometricError = (message) => {
-    setBiometricMessage(message || "Biometric login unavailable. Please try again.");
+  const handleBiometricError = (message, options) => {
+    let errorMessage = message || "Biometric login unavailable. Please try again.";
+
+    // If options include redirect link, add it to the message
+    if (options?.showRedirectLink && options?.redirectPath) {
+      // Store redirect info separately for rendering
+      setBiometricMessage({
+        message: errorMessage,
+        showRedirect: true,
+        redirectPath: options.redirectPath,
+        redirectMessage: options.redirectMessage || "Register Face ID"
+      });
+    } else {
+      setBiometricMessage(errorMessage);
+    }
   };
 
   return (
@@ -406,7 +483,10 @@ export default function LoginPage() {
 
                 setIsTurnstileLoading(true);
                 const widgetId = window.turnstile.render(turnstileRef.current, {
-                  sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+                  sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || (() => {
+                    console.warn("⚠️ [Turnstile] NEXT_PUBLIC_TURNSTILE_SITE_KEY is not set. Please add it to your .env file.");
+                    return '1x00000000000000000000AA'; // Test key - replace with production key
+                  })(),
                   callback: (token) => {
                     setTurnstileToken(token);
                     setIsTurnstileLoading(false);
@@ -775,10 +855,31 @@ export default function LoginPage() {
                         </div>
                       </button>
                     </div>
+
                     {biometricMessage && (
-                      <p className="text-red-400 text-xs text-center w-full max-w-[305px] break-words">
-                        {biometricMessage}
-                      </p>
+                      <div className="w-full max-w-[305px] flex flex-col items-center gap-2">
+                        <p className="text-red-400 text-xs text-center break-words">
+                          {typeof biometricMessage === 'string'
+                            ? biometricMessage
+                            : biometricMessage.message}
+                        </p>
+                        {typeof biometricMessage === 'object' && biometricMessage.showRedirect && (
+                          <button
+                            onClick={() => {
+                              // If redirect is to login (for registration), add auto-register flag
+                              const path = biometricMessage.redirectPath || "/face-verification";
+                              if (path === "/login") {
+                                router.push("/login?autoRegister=true");
+                              } else {
+                                router.push(path);
+                              }
+                            }}
+                            className="text-blue-400 text-xs underline hover:text-blue-300 transition-colors"
+                          >
+                            {biometricMessage.redirectMessage || "Register Face ID here"}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -824,5 +925,13 @@ export default function LoginPage() {
         </div>
       </div>
     </>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginPageContent />
+    </Suspense>
   );
 }

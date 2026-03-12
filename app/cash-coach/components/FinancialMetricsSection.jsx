@@ -8,11 +8,6 @@ export const FinancialMetricsSection = () => {
                     className="w-[83px] h-[83px] object-cover flex-shrink-0"
                     alt="Receipt scanning illustration"
                     src="/scanner.png"
-                    loading="eager"
-                    decoding="async"
-                    fetchPriority="high"
-                    width={83}
-                    height={83}
                 />
                 <div className="flex flex-col items-start ">
                     <h3 className="[font-family:'Poppins',Helvetica] font-bold text-[#FFFFFF] text-[16px] tracking-[0.02px] leading-[normal]">

@@ -164,6 +164,33 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
             let isMissed = false;
             let isLocked = false;
 
+            // ✅ CHECK ACTIVE FLAG FIRST - If day is inactive, force locked status
+            if (dayData.active === false) {
+                effectiveStatus = 'locked';
+                isLocked = true;
+                
+                const config = getRewardConfig('locked', dayData.dayNumber, isBigRewardEligible);
+                
+                return {
+                    day: dayData.dayNumber,
+                    calendarDay: dayData.dayNumber,
+                    status: 'locked',
+                    originalStatus: dayData.status,
+                    coins: 0, // No rewards for inactive days
+                    xp: 0,
+                    originalCoins: 0,
+                    originalXp: 0,
+                    multiplier: 1,
+                    claimedAt: null,
+                    nextUnlockTime: null,
+                    isLocked: true,
+                    isMissed: false,
+                    isFutureWeek: false,
+                    isInactive: true, // Flag to indicate this day is administratively disabled
+                    ...config
+                };
+            }
+
             // For future weeks: force all rewards to be locked
             if (isFutureWeek) {
                 effectiveStatus = 'locked';
@@ -296,8 +323,14 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
             const displayCoins = dayData.rewardCoins ? (dayData.rewardCoins * weeklyMultiplier) : (dayData.coins * weeklyMultiplier);
             const displayXp = dayData.rewardXp ? (dayData.rewardXp * weeklyMultiplier) : (dayData.xp * weeklyMultiplier);
 
+            // V3 API: dayNumber is always 1-7 (user-relative), no calculation needed!
+            // V2 API: Had complex logic for first week vs subsequent weeks
+            // V3 simplification: Just use dayNumber directly
+            const displayDayNumber = dayData.dayNumber;
+
             return {
-                day: dayData.dayNumber,
+                day: displayDayNumber, // Always 1-7 in V3
+                calendarDay: dayData.dayNumber, // Same as day in V3
                 status: effectiveStatus,
                 originalStatus: dayData.status,
                 coins: displayCoins, // Apply multiplier to displayed coins
@@ -342,7 +375,11 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
         if (!weekData || !weekData.days || !Array.isArray(weekData.days)) {
             return [];
         }
-        return weekData.days.map(transformRewardData).filter(Boolean);
+        // V3 API: No hidden days, all 7 days are always returned
+        // V2 API: Had to filter out hidden days
+        return weekData.days
+            .map(transformRewardData)
+            .filter(Boolean);
     }, [weekData, transformRewardData]);
 
     // Memoized grid days (Days 1-6)
@@ -439,6 +476,12 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
                 }
 
                 const rewardData = weekData?.days?.find(day => day.dayNumber === dayNumber);
+
+                // ✅ CHECK IF DAY IS INACTIVE
+                if (rewardData && rewardData.active === false) {
+                    setError("This reward is currently unavailable. Please contact support.");
+                    return;
+                }
 
                 // Special case: Day 7 can be claimed for normal reward even if big reward is missed
                 // Allow claiming if API says it's claimable, regardless of big reward eligibility
@@ -544,9 +587,9 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
                 </div>
 
                 <MemoizedButton
-                    onClick={() => handleClaimClick(reward.day)}
-                    disabled={reward.status !== 'claimable' || reward.isLocked || reward.isMissed || reward.isFutureWeek || claimingDay === reward.day || locallyClaimedDays.has(reward.day) || reward.status === 'claimed'}
-                    className={`w-[166px] ${reward.buttonBg} absolute top-[126px] left-0 h-11 rounded-[0px_0px_3.13px_3.13px] overflow-hidden ${reward.status === 'claimable' && !reward.isLocked && !reward.isMissed && !reward.isFutureWeek && !locallyClaimedDays.has(reward.day) && reward.status !== 'claimed'
+                    onClick={() => handleClaimClick(reward.calendarDay || reward.day)}
+                    disabled={reward.status !== 'claimable' || reward.isLocked || reward.isMissed || reward.isFutureWeek || claimingDay === (reward.calendarDay || reward.day) || locallyClaimedDays.has(reward.calendarDay || reward.day) || reward.status === 'claimed'}
+                    className={`w-[166px] ${reward.buttonBg} absolute top-[126px] left-0 h-11 rounded-[0px_0px_3.13px_3.13px] overflow-hidden ${reward.status === 'claimable' && !reward.isLocked && !reward.isMissed && !reward.isFutureWeek && !locallyClaimedDays.has(reward.calendarDay || reward.day) && reward.status !== 'claimed'
                         ? 'cursor-pointer'
                         : 'cursor-not-allowed opacity-75'
                         }`}
@@ -849,20 +892,6 @@ export const DailyRewardsSection = ({ weekData, isCurrentWeek, isFutureWeek, onC
                 isEligible={showBigRewardAnimation}
                 onAnimationComplete={() => setShowBigRewardAnimation(false)}
             />
-            <section className=" ">
-                <div className="w-full max-w-[335px] sm:max-w-[375px] mx-auto">
-                    <div className="w-full p-4 sm:p-6 rounded-lg bg-[linear-gradient(to_right,rgba(255,255,255,0.25)_0%,rgba(255,255,255,0.1)_50%,rgba(0,0,0,0.9)_100%)] shadow-lg border border-white/20">
-                        <div className="flex flex-col justify-start gap-2">
-                            <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-[#f4f3fc] text-[14px] sm:text-[14px] ">
-                                Disclaimer
-                            </h2>
-                            <p className="[font-family:'Poppins',Helvetica] font-light text-[#FFFFFF] text-[13px] sm:text-base text-start leading-5 sm:leading-6">
-                                Points ar for loyalty use only and do not reflect real-world currency
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </section>
 
             {/* Error Modal */}
             {error && (

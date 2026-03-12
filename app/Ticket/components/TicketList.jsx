@@ -24,6 +24,11 @@ import { FilterNavigation } from "@/components/InstantFilter";
 // ============================================================================
 // CONSTANTS
 // ============================================================================
+/** Dedupe tickets fetch: avoid double hit when effect runs twice (e.g. Strict Mode remount) */
+const TICKETS_FETCH_DEBOUNCE_MS = 3000;
+let lastTicketsFetchTime = 0;
+let initialFetchDone = false;
+
 const FILTER_OPTIONS = [
     { id: "all", label: "All" },
     { id: "in_progress", label: "In Progress" },
@@ -135,17 +140,25 @@ export const TicketList = () => {
     // ============================================================================
     // EFFECTS
     // ============================================================================
-    // Load tickets and stats only once on component mount
+    // Load tickets and stats once on mount; time-based dedupe so Strict Mode remount doesn't double-hit
     useEffect(() => {
         const token = localStorage.getItem('authToken');
-        if (!token || hasLoadedData) return;
+        if (!token) return;
 
-        // Fetch tickets and stats in parallel for better performance
-        // Only load once - use hasLoadedData flag to prevent multiple calls
+        const now = Date.now();
+        if (initialFetchDone && now - lastTicketsFetchTime < TICKETS_FETCH_DEBOUNCE_MS) return;
+        initialFetchDone = true;
+        lastTicketsFetchTime = now;
+
         dispatch(fetchUserTickets({ filters: { page: 1, limit: 100 }, token }));
         dispatch(fetchTicketStats({ token }));
         setHasLoadedData(true);
-    }, [dispatch]); // Only run once on mount - eslint-disable-line react-hooks/exhaustive-deps
+
+        return () => {
+            const t = setTimeout(() => { initialFetchDone = false; }, 500);
+            return () => clearTimeout(t);
+        };
+    }, [dispatch]);
 
     // Clear errors on component mount
     useEffect(() => {

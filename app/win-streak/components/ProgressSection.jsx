@@ -254,7 +254,7 @@ export const ProgressSection = ({
                     setActivityStats(response.data);
                 }
             } catch (error) {
-                // Failed to fetch daily activity stats - silently handle
+                console.error('Failed to fetch daily activity stats:', error);
             } finally {
                 setActivityLoading(false);
             }
@@ -420,14 +420,14 @@ export const ProgressSection = ({
                                 {dayData.reward.coins > 0 && (
                                     <div className="flex items-center gap-1">
                                         <span className="text-sm font-bold text-black drop-shadow-sm">{dayData.reward.coins}</span>
-                                        <img className="w-4 h-4 drop-shadow-sm" alt="coin" src="/dollor.png" loading="eager" decoding="async" width="16" height="16" />
+                                        <img className="w-4 h-4 drop-shadow-sm" alt="coin" src="/dollor.png" />
                                     </div>
                                 )}
                                 {/* XP */}
                                 {dayData.reward.xp > 0 && (
                                     <div className="flex items-center gap-1 ml-1">
                                         <span className="text-sm font-bold text-black drop-shadow-sm">{dayData.reward.xp}</span>
-                                        <img className="w-4 h-4 drop-shadow-sm" alt="XP" src="/xp.svg" onError={(e) => { e.target.src = "/xp.png"; }} loading="eager" decoding="async" width="16" height="16" />
+                                        <img className="w-4 h-4 drop-shadow-sm" alt="XP" src="/xp.svg" onError={(e) => { e.target.src = "/xp.png"; }} />
                                     </div>
                                 )}
                             </div>
@@ -456,8 +456,6 @@ export const ProgressSection = ({
                                             loading="eager"
                                             decoding="async"
                                             fetchPriority="high"
-                                            width="140"
-                                            height="100"
                                         />
                                         {/* Treasure box overlay on the leaf - better proportioned - increased size */}
                                         <img
@@ -468,8 +466,6 @@ export const ProgressSection = ({
                                             loading="eager"
                                             decoding="async"
                                             fetchPriority="high"
-                                            width="138"
-                                            height="120"
                                         />
                                         {/* Show reward amount for milestone days - Coins and XP */}
                                         {dayData.reward && (dayData.reward.coins > 0 || dayData.reward.xp > 0) && (
@@ -477,13 +473,13 @@ export const ProgressSection = ({
                                                 {dayData.reward.coins > 0 && (
                                                     <>
                                                         <span className="text-xs font-bold text-black">{dayData.reward.coins}</span>
-                                                        <img className="w-3 h-3" alt="coin" src="/dollor.png" loading="eager" decoding="async" width="12" height="12" />
+                                                        <img className="w-3 h-3" alt="coin" src="/dollor.png" />
                                                     </>
                                                 )}
                                                 {dayData.reward.xp > 0 && (
                                                     <>
                                                         <span className="text-xs font-bold text-black">{dayData.reward.xp}</span>
-                                                        <img className="w-3 h-3" alt="XP" src="/xp.svg" onError={(e) => { e.target.src = "/xp.png"; }} loading="eager" decoding="async" width="12" height="12" />
+                                                        <img className="w-3 h-3" alt="XP" src="/xp.svg" onError={(e) => { e.target.src = "/xp.png"; }} />
                                                     </>
                                                 )}
                                             </div>
@@ -498,8 +494,6 @@ export const ProgressSection = ({
                                             alt="Leaf with Tick"
                                             loading="eager"
                                             decoding="async"
-                                            width="150"
-                                            height="80"
                                         />
                                         {/* Show tick mark for completed days */}
                                         {dayData.isCompleted && (

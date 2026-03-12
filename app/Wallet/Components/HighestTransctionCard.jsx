@@ -14,104 +14,126 @@ export const HighestTransctionCard = ({
     isAdjustment,
     adjustmentType,
 }) => {
-    // Priority: metadata.xp > finalXp > xpBonus
-    // Use metadata.xp if available (for Daily Rewards), otherwise use finalXp, then xpBonus
-    let displayXp = (xp !== null && xp !== undefined) ? xp :
-        (finalXp !== null && finalXp !== undefined ? finalXp : xpBonus);
+    let displayXp =
+        xp !== null && xp !== undefined
+            ? xp
+            : finalXp !== null && finalXp !== undefined
+                ? finalXp
+                : xpBonus;
 
-    // For subtract adjustments, show negative values
-    const isSubtractAdjustment = isAdjustment && adjustmentType === "subtract";
+    const isSubtractAdjustment =
+        isAdjustment && adjustmentType === "subtract";
 
-    // Apply negative sign for subtract adjustments
     if (isSubtractAdjustment) {
-        if (coins !== undefined && coins !== null && coins !== 0) {
-            coins = -Math.abs(coins);
-        }
-        if (displayXp !== undefined && displayXp !== null && displayXp !== 0) {
-            displayXp = -Math.abs(displayXp);
-        }
+        if (coins) coins = -Math.abs(coins);
+        if (displayXp) displayXp = -Math.abs(displayXp);
     }
+
     return (
         <article
-            className="relative w-[335px] h-[92px] bg-black  rounded-[10px] shadow-[0_0_10px_6px_rgba(255,255,255,0.15)]"
+            className="relative w-[335px] h-[92px] bg-black rounded-[10px]
+      shadow-[0_0_10px_6px_rgba(255,255,255,0.15)] overflow-hidden"
             role="button"
             tabIndex={0}
-            aria-label={`${gameName} game tile with ${coins} coins and +${xpBonus} XP bonus`}
         >
+            {/* Game Icon */}
             <div className="absolute w-14 h-14 top-3.5 left-4 rounded-full overflow-hidden">
-                {/* 
-                  Ensure that the /download.png image exists in your public folder.
-                  Also, verify that next/image is configured correctly.
-                  Use optional chaining to fall back to a default image if gameLogoSrc is not provided.
-                */}
                 <Image
                     className="w-full h-full object-cover"
                     alt={gameLogoSrc ? `${gameName} game logo` : "Default game logo"}
                     src={gameLogoSrc || "/download.png"}
                     width={64}
                     height={64}
-                    onError={(e) => {
-                        e.target.onerror = null;
-                        e.target.src = "/download.png";
-                    }}
-                    priority
-                    loading="eager"
+                    loading="lazy"
+                    decoding="async"
                 />
             </div>
 
-            <header className="absolute w-[139px] top-[21px] left-[92px]">
-                <h2 className="[font-family:'Poppins',Helvetica] font-bold text-[#d9d9d9] text-[16px] tracking-[0.02px] leading-[normal] opacity-[100%] truncate max-w-[139px]">
+            {/* Reward / Game Name (WRAPS, NO TRUNCATE) */}
+            <header className="absolute top-[16px] left-[92px] right-[120px]">
+                <h2
+                    className="[font-family:'Poppins',Helvetica]
+          font-bold text-[#d9d9d9] text-[15px]
+          leading-[18px]
+          break-words whitespace-normal
+          line-clamp-2"
+                >
                     {gameName}
                 </h2>
             </header>
 
-            <p className="absolute top-[45px] left-[92px] [font-family:'Poppins',Helvetica] font-light text-[#d9d9d9] text-[13px] tracking-[0.02px] leading-[18px] whitespace-nowrap">
+            {/* Status */}
+            <p
+                className="absolute top-[52px] left-[92px] right-[120px]
+        [font-family:'Poppins',Helvetica]
+        font-light text-[#d9d9d9] text-[13px]
+        break-words whitespace-normal line-clamp-1"
+            >
                 {status}
             </p>
 
+            {/* Coins (RIGHT SIDE SAFE FOR LARGE VALUES) */}
             <div
-                className="absolute flex items-center justify-end w-[60px] h-[30px] top-[22px] left-[236px] gap-1"
+                className="absolute flex items-center justify-end
+        top-[22px] right-4 gap-1 max-w-[105px]"
                 aria-label={`${coins} coins`}
             >
-                <span className="[font-family:'Poppins',Helvetica] font-semibold text-[#FFFFFF] text-[20px] tracking-[0.02px] leading-[normal]">
+                <span
+                    className="[font-family:'Poppins',Helvetica]
+          font-semibold text-[#FFFFFF] text-[20px]
+          text-right tabular-nums break-all"
+                >
                     {coins !== undefined && coins !== null && coins !== 0
-                        ? (isSubtractAdjustment ? `-${Math.abs(coins)}` : coins)
-                        : (coins || 0)
-                    }
+                        ? isSubtractAdjustment
+                            ? `-${Math.abs(coins)}`
+                            : coins
+                        : 0}
                 </span>
 
                 <Image
-                    className="w-[20px] mb-1 h-[21px] aspect-[0.97]"
+                    className="w-[20px] h-[21px] flex-shrink-0"
                     alt="Coin icon"
                     src="/dollor.png"
                     width={20}
                     height={21}
-                    loading="eager"
-                    priority
+                    loading="lazy"
+                    decoding="async"
                 />
             </div>
 
+            {/* XP (POSITION UNCHANGED – AS REQUESTED) */}
             <div
                 className="absolute top-[70px] left-[123px]"
-                aria-label={`Plus ${displayXp} XP bonus${finalXp ? ' (Final XP with multiplier)' : ''}`}
+                aria-label={`XP ${displayXp}`}
             >
-                <div className="relative flex items-center h-7 -top-0.5 -left-1.5 gap-0">
+                <div className="relative flex items-center h-7 -top-0.5  -left-1.5">
                     <Image
-                        className="w-[27px] h-7 flex-shrink-0"
+                        className="w-[27px] h-7  -mr-[2.5px] flex-shrink-0"
                         alt="Left decoration"
                         src="https://c.animaapp.com/UNpBPFIY/img/vector-4235.svg"
                         width={27}
                         height={28}
                         loading="eager"
                         decoding="async"
+
                     />
 
-                    <div className="relative flex items-center gap-1 px-2 bg-[#201f59] rounded-[4px_4px_0px_0px] shadow-[0px_0px_4px_#fef47e33] min-w-[30px] -ml-[2px] -mr-[2px]">
-                        <span className="[font-family:'Poppins',Helvetica] font-medium text-white text-[13px] tracking-[0] leading-[normal] whitespace-nowrap">
-                            {displayXp !== undefined && displayXp !== null && displayXp !== 0
-                                ? (isSubtractAdjustment ? `-${Math.abs(displayXp)}` : `+${displayXp}`)
-                                : `+${displayXp || 0}`
-                            }
+                    <div
+                        className="flex items-center gap-1 px-2 bg-[#201f59]
+            rounded-[4px_4px_0px_0px]
+            shadow-[0px_0px_4px_#fef47e33]
+            max-w-[150px] break-all"
+                    >
+                        <span
+                            className="[font-family:'Poppins',Helvetica]
+              font-medium text-white text-[13px]
+              tabular-nums"
+                        >
+                            {displayXp
+                                ? isSubtractAdjustment
+                                    ? `-${Math.abs(displayXp)}`
+                                    : `+${displayXp}`
+                                : "+0"}
                         </span>
 
                         <Image
@@ -120,19 +142,19 @@ export const HighestTransctionCard = ({
                             src="/xp.svg"
                             width={16}
                             height={15}
-                            loading="eager"
-                            priority
+                            loading="lazy"
+                            decoding="async"
                         />
                     </div>
 
                     <Image
-                        className="w-[26px] h-[27px] flex-shrink-0 relative"
-                        style={{ top: '2px' }}
+                        className="w-[26px] h-[27px]  -ml-[3px] flex-shrink-0 relative"
+                        style={{ top: "2px" }}
                         alt="Right decoration"
                         src="https://c.animaapp.com/UNpBPFIY/img/vector-4234.svg"
                         width={26}
                         height={27}
-                        loading="eager"
+                        loading="lazy"
                         decoding="async"
                     />
                 </div>

@@ -31,20 +31,11 @@ export default function TransactionHistory() {
     // Get wallet transactions from Redux store
     const { transactions, status } = useSelector((state) => state.walletTransactions);
 
-    // Fetch transactions on mount if not already loaded (stale-while-revalidate pattern)
-    // Shows cached data immediately, fetches fresh data in background
+    // BEST PRACTICE: Fetch once when idle; slice uses cache (SWR). No duplicate 100ms refresh.
     useEffect(() => {
         if (!token) return;
-
-        // Only fetch if status is idle (not already loading/fetched)
-        // The stale-while-revalidate pattern in the slice will handle cache checking
         if (status === 'idle') {
             dispatch(fetchWalletTransactions({ token, limit: 5 }));
-        } else if (status === 'succeeded' && transactions.length > 0) {
-            // If we have cached data, trigger background refresh to get latest
-            setTimeout(() => {
-                dispatch(fetchWalletTransactions({ token, limit: 5, background: true }));
-            }, 100);
         }
     }, [token, status, dispatch]);
 

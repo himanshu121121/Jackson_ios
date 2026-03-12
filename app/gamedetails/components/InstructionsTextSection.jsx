@@ -3,9 +3,9 @@ import React, { useState } from "react";
 export const InstructionsTextSection = ({ game }) => {
     const [isExpanded, setIsExpanded] = useState(false);
 
-    // Clean HTML tags from game description - use besitosRawData first
-    const rawData = game?.besitosRawData || {};
-    const rawDescription = rawData.description || game?.description || game?.card_text || game?.details?.description || "No description available";
+    // Clean HTML tags from game description - use normalizer for both besitos and bitlab
+    const { normalizeGameDescription } = require('@/lib/gameDataNormalizer');
+    const rawDescription = normalizeGameDescription(game) || game?.description || game?.card_text || game?.details?.description || "No description available";
     const instructionText = rawDescription.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
 
     const handleToggle = () => setIsExpanded(!isExpanded);

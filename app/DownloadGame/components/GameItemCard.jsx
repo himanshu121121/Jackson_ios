@@ -7,6 +7,74 @@ const GameItemCard = ({
     onClick,
     isEmpty = false
 }) => {
+    // Get user ID from localStorage - with better fallback logic
+    const getUserId = () => {
+        try {
+            const userData = localStorage.getItem('user');
+            if (userData) {
+                const user = JSON.parse(userData);
+                const userId = user._id || user.id || user.userId;
+                if (userId) {
+                    return userId;
+                }
+            }
+            // Fallback: try other localStorage keys
+            const userId = localStorage.getItem('userId') ||
+                localStorage.getItem('user_id') ||
+                localStorage.getItem('id');
+            if (userId) {
+                return userId;
+            }
+        } catch (error) {
+            console.error('❌ [GameItemCard] Error getting user ID:', error);
+        }
+        console.warn('⚠️ [GameItemCard] No user ID found in localStorage');
+        return null;
+    };
+
+    // Helper function to add user ID to redirect URL
+    const addUserIdToRedirectUrl = (url, userId) => {
+        if (!url) {
+            console.warn('⚠️ [GameItemCard] No URL provided');
+            return url;
+        }
+
+        if (!userId) {
+            console.warn('⚠️ [GameItemCard] No user ID provided, cannot add to URL');
+            return url;
+        }
+
+        try {
+            const urlObj = new URL(url);
+            const existingParam = urlObj.searchParams.get('partner_user_id');
+
+            // Check if partner_user_id exists and has a value
+            if (existingParam && existingParam.trim() !== '') {
+                return url; // Already has user ID with value
+            }
+
+            // If parameter exists but is empty, or doesn't exist, set it
+            urlObj.searchParams.set("partner_user_id", userId);
+            const finalUrl = urlObj.toString();
+            return finalUrl;
+        } catch (error) {
+            console.error('❌ [GameItemCard] URL parsing failed, using fallback:', error);
+            // If URL parsing fails, try to append/replace as query string
+            // Remove existing empty partner_user_id if present
+            let cleanUrl = url;
+            if (url.includes('partner_user_id=')) {
+                // Remove existing empty parameter
+                cleanUrl = url.replace(/[?&]partner_user_id=[^&]*/g, '');
+                // Clean up any double ? or & at the start
+                cleanUrl = cleanUrl.replace(/^([^?]*)\?+/, '$1?').replace(/^([^?]*)\&+/, '$1&');
+            }
+
+            const separator = cleanUrl.includes("?") ? "&" : "?";
+            const finalUrl = `${cleanUrl}${separator}partner_user_id=${userId}`;
+            return finalUrl;
+        }
+    };
+
     const handleClick = (e) => {
         if (onClick) {
             onClick(game, e)
@@ -47,19 +115,34 @@ const GameItemCard = ({
     // Format numbers with commas for better readability
     const formatNumber = (num) => {
         if (num === null || num === undefined) return "0";
-        const numValue = typeof num === 'string' ? parseFloat(num.replace(/,/g, '')) : num;
+        const numValue = typeof num === 'string' ? parseFloat(String(num).replace(/,/g, '')) : num;
         if (isNaN(numValue)) return "0";
         return numValue.toLocaleString();
     };
 
+    // Coins: prefer API rewards (unchanged). XP: total from tasks (getTotalPromisedPoints)
+    const rawCoins = game.rewards?.coins ?? game.rewards?.gold ?? game.amount ?? game.score ?? 0;
+    const coinsNum = typeof rawCoins === 'number' ? rawCoins : (typeof rawCoins === 'string' ? parseFloat(String(rawCoins).replace(/[$,]/g, '')) || 0 : 0);
+    const displayCoins = Number.isFinite(coinsNum) ? (coinsNum === Math.round(coinsNum) ? String(Math.round(coinsNum)) : (Math.round(coinsNum * 100) / 100).toString()) : "0";
+    let displayXP = "0";
+    try {
+        const { getTotalPromisedPoints } = require('@/lib/gameDataNormalizer');
+        const { totalXP } = getTotalPromisedPoints(game);
+        displayXP = Number.isFinite(totalXP) ? String(Math.round(totalXP)) : "0";
+    } catch (_) {
+        const rawXP = game.rewards?.xp ?? game.xp ?? game.bonus ?? 0;
+        const xpNum = typeof rawXP === 'number' ? rawXP : (typeof rawXP === 'string' ? parseFloat(String(rawXP).replace(/,/g, '')) || 0 : 0);
+        displayXP = Number.isFinite(xpNum) ? String(Math.round(xpNum)) : "0";
+    }
+
     const stats = [
         {
-            value: formatNumber(game.amount || game.score || "0"),
+            value: formatNumber(displayCoins),
             icon: "https://c.animaapp.com/3btkjiTJ/img/image-3937@2x.png",
             iconAlt: "Coin",
         },
         {
-            value: formatNumber(game.xp || "0"),
+            value: formatNumber(displayXP),
             icon: "https://c.animaapp.com/3btkjiTJ/img/pic.svg",
             iconAlt: "XP",
         },
@@ -78,13 +161,15 @@ const GameItemCard = ({
                     <img
                         className="w-full h-full object-cover cursor-pointer hover:opacity-80 transition-opacity"
                         alt={`${cleanGameName} game icon`}
-                        src={game.image || game.overlayImage || "/placeholder-game.png"}
+                        src={game.image || game.overlayImage || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png"}
                         loading="eager"
                         decoding="async"
                         width="55"
                         height="55"
                         onError={(e) => {
-                            e.target.src = "/placeholder-game.png";
+                            if (e.target.src !== "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png") {
+                                e.target.src = "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png";
+                            }
                         }}
                         onClick={(e) => {
                             e.stopPropagation(); // Prevent card click
@@ -140,7 +225,25 @@ const GameItemCard = ({
                     onClick={(e) => {
                         e.stopPropagation(); // Prevent card click
                         if (game.downloadUrl || game.redirectUrl) {
-                            window.open(game.downloadUrl || game.redirectUrl, '_blank');
+                            const url = game.downloadUrl || game.redirectUrl;
+                            const userId = getUserId();
+
+                            if (!userId) {
+                                console.error('❌ [GameItemCard] Cannot open URL: No user ID found');
+                                alert('Error: User ID not found. Please log in again.');
+                                return;
+                            }
+
+                            // Add user ID to redirect URL (will replace empty value if exists)
+                            const finalUrl = addUserIdToRedirectUrl(url, userId);
+
+                            if (finalUrl === url && !url.includes(`partner_user_id=${userId}`)) {
+                                console.error('❌ [GameItemCard] Failed to add user ID to URL');
+                                alert('Error: Failed to add user ID to redirect URL.');
+                                return;
+                            }
+
+                            window.open(finalUrl, '_blank');
                         } else if (onClick) {
                             onClick(game, e);
                         }

@@ -1,14 +1,9 @@
-import React, { useEffect } from "react";
+import React from "react";
 import Image from "next/image";
-import { useDispatch, useSelector } from "react-redux";
-import { useAuth } from "../../../contexts/AuthContext";
-import { fetchBonusDays } from "../../../lib/redux/slice/dailyChallengeSlice";
+import { useSelector } from "react-redux";
 
 export const ChallengeGroupSection = ({ streak }) => {
-    const dispatch = useDispatch();
-    const { token } = useAuth() || {};
-    
-    // Get bonus days data from Redux store
+    // Read-only — DailyChallenge.jsx owns all fetchBonusDays dispatches
     const {
         bonusDays: bonusDaysData,
         bonusDaysStatus,
@@ -17,27 +12,6 @@ export const ChallengeGroupSection = ({ streak }) => {
     // Extract bonus days array and current streak from Redux state
     const bonusDays = bonusDaysData?.bonusDays || [];
     const apiCurrentStreak = bonusDaysData?.currentStreak || null;
-
-    // Fetch bonus days data - show cached data immediately, refresh in background
-    useEffect(() => {
-        if (!token) {
-            return;
-        }
-
-        // Only fetch if status is idle (not already loading or succeeded with fresh data)
-        if (bonusDaysStatus === "idle") {
-            dispatch(fetchBonusDays({ token }));
-        } else {
-            // If we have cached data, trigger background refresh after showing cached data
-            if (bonusDaysData) {
-                const refreshTimer = setTimeout(() => {
-                    dispatch(fetchBonusDays({ token, force: true }));
-                }, 100); // Small delay to let cached data render first
-
-                return () => clearTimeout(refreshTimer);
-            }
-        }
-    }, [token, dispatch, bonusDaysStatus, bonusDaysData]);
 
     // Generate milestones dynamically from bonus days - only use API data, no fallbacks
     const generateMilestones = () => {
@@ -93,13 +67,13 @@ export const ChallengeGroupSection = ({ streak }) => {
     if (milestones.length > 0 && currentStreak > 0) {
         // Sort milestones by day number to ensure correct order
         const sortedMilestones = [...milestones].sort((a, b) => a.value - b.value);
-        
+
         // If streak is less than first milestone, interpolate from 0% to first milestone position
         if (currentStreak < minMilestone) {
             const firstMilestone = sortedMilestones[0];
             const firstPosition = parseFloat(firstMilestone.leftPosition);
             const firstDay = firstMilestone.value;
-            
+
             // Linear interpolation from Day 1 (0%) to first milestone
             progressPercentage = (currentStreak / firstDay) * firstPosition;
         }
@@ -112,7 +86,7 @@ export const ChallengeGroupSection = ({ streak }) => {
             // Find the two milestones that bracket the current streak
             let lowerMilestone = null;
             let upperMilestone = null;
-            
+
             for (let i = 0; i < sortedMilestones.length; i++) {
                 // Check if current streak exactly matches this milestone
                 if (currentStreak === sortedMilestones[i].value) {
@@ -127,21 +101,21 @@ export const ChallengeGroupSection = ({ streak }) => {
                     break;
                 }
             }
-            
+
             // If we have both milestones, interpolate between them
             if (lowerMilestone && upperMilestone && progressPercentage === 0) {
                 const lowerPosition = parseFloat(lowerMilestone.leftPosition);
                 const upperPosition = parseFloat(upperMilestone.leftPosition);
                 const lowerDay = lowerMilestone.value;
                 const upperDay = upperMilestone.value;
-                
+
                 // Linear interpolation
                 const dayRange = upperDay - lowerDay;
                 const progressInRange = (currentStreak - lowerDay) / dayRange;
                 progressPercentage = lowerPosition + (progressInRange * (upperPosition - lowerPosition));
             }
         }
-        
+
         // Ensure progress is between 0 and 100
         progressPercentage = Math.max(0, Math.min(100, progressPercentage));
     }
@@ -281,9 +255,8 @@ export const ChallengeGroupSection = ({ streak }) => {
                                                         width={14}
                                                         height={14}
                                                         className="inline-block"
-                                                        loading="eager"
+                                                        loading="lazy"
                                                         decoding="async"
-                                                        priority
                                                     />
                                                 </div>
                                             )}
@@ -298,9 +271,8 @@ export const ChallengeGroupSection = ({ streak }) => {
                                                         width={14}
                                                         height={14}
                                                         className="inline-block"
-                                                        loading="eager"
+                                                        loading="lazy"
                                                         decoding="async"
-                                                        priority
                                                     />
                                                 </div>
                                             )}

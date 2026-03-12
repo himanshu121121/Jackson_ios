@@ -4,32 +4,35 @@ import { useDispatch, useSelector } from "react-redux";
 import { fetchGamesBySection } from "@/lib/redux/slice/gameSlice";
 import { useRouter } from "next/navigation";
 import { handleGameDownload } from "@/lib/gameDownloadUtils";
-import { filterIosTitleGames } from "@/lib/utils/gameFilters";
-// Removed getAgeGroupFromProfile and getGenderFromProfile - now passing user object directly
+import { useVipStatus } from "@/hooks/useVipStatus";
+import { trackUndoUsage, getUndoUsage } from "@/lib/api";
+
+const EMPTY_ARRAY = [];
+
+const UNDO_LIMITS = { Free: 1, Bronze: 6, Platinum: 12, Gold: 8 };
 
 const GameCard = ({ onClose: onCloseProp }) => {
     const dispatch = useDispatch();
     const router = useRouter();
-    const { gamesBySection, gamesBySectionStatus, error, inProgressGames } = useSelector((state) => state.games);
-    const { details: userProfile } = useSelector((state) => state.profile);
 
-    // Get data for "Swipe" section specifically
+    // Get data for "Swipe" section. Same fetch pattern as HighestEarningGame; user from localStorage (no profile).
     const sectionName = "Swipe";
-    const swipeGames = gamesBySection[sectionName] || [];
-    const swipeStatus = gamesBySectionStatus[sectionName] || "idle";
-    // Only show games whose title contains "ios" (case-insensitive)
-    const iosSwipeGames = useMemo(() => {
-        return filterIosTitleGames(swipeGames);
-    }, [swipeGames]);
-
+    const CACHE_STALE_MS = 5 * 60 * 1000;
+    const FOCUS_REFRESH_STALE_MS = 2 * 60 * 1000;
+    const swipeGames = useSelector((state) => state.games.gamesBySection[sectionName] ?? EMPTY_ARRAY);
+    const swipeStatus = useSelector((state) => state.games.gamesBySectionStatus[sectionName] ?? "idle");
+    const sectionTimestamp = useSelector((state) => state.games.gamesBySectionTimestamp[sectionName]);
+    const inProgressGames = useSelector((state) => state.games.inProgressGames ?? EMPTY_ARRAY);
+    const { details: userProfile } = useSelector((state) => state.profile);
+    const { currentTier } = useVipStatus();
     const [showTooltip, setShowTooltip] = useState(false);
     const [currentGameIndex, setCurrentGameIndex] = useState(0);
     const [undoCount, setUndoCount] = useState(0);
     const [showVIPModal, setShowVIPModal] = useState(false);
     const [isVisible, setIsVisible] = useState(true);
     const [swipeHistory, setSwipeHistory] = useState([]);
-    const [isFirstTimeUser, setIsFirstTimeUser] = useState(false);
-    const [maxUndoLimit, setMaxUndoLimit] = useState(3);
+    const [maxUndoLimit, setMaxUndoLimit] = useState(1);
+    const [isUnlimitedUndo, setIsUnlimitedUndo] = useState(false);
     const [showLastCardModal, setShowLastCardModal] = useState(false);
     const [isLastCardReached, setIsLastCardReached] = useState(false);
     const [showLastCard, setShowLastCard] = useState(false);
@@ -37,6 +40,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
     const [isLoopMode, setIsLoopMode] = useState(false);
     const tooltipRef = useRef(null);
     const cardRef = useRef(null);
+    const undoLoadedRef = useRef(false);
     const [swipeDirection, setSwipeDirection] = useState(null);
     const [startX, setStartX] = useState(0);
     const [currentX, setCurrentX] = useState(0);
@@ -53,55 +57,74 @@ const GameCard = ({ onClose: onCloseProp }) => {
         return localStorage.getItem('userId') || 'default_user_id';
     }, []);
 
-    // SIMPLE LOGIC: Use Redux state to check if user has downloaded games
+    // Load undo count on mount: backend is source of truth, localStorage is fallback
     useEffect(() => {
-        // Use Redux state instead of localStorage for consistency
-        const hasDownloadedGames = inProgressGames && inProgressGames.length > 0;
-
-        // SIMPLE LOGIC: If no downloaded games = unlimited undos, no VIP modal
-        // If downloaded games = limited undos (3), VIP modal after limit
-        const isFirstTime = !hasDownloadedGames;
-        setIsFirstTimeUser(isFirstTime);
-
-        // Load undo count from LOCAL storage
-        const savedUndoCount = localStorage.getItem('gameCard_undoCount');
-        if (isFirstTime) {
-            // No downloaded games: unlimited undos, reset count
-            setUndoCount(0);
-            localStorage.removeItem('gameCard_undoCount');
-            setMaxUndoLimit(-1); // Unlimited
-        } else {
-            // Has downloaded games: limited undos
-            const countToSet = savedUndoCount ? parseInt(savedUndoCount, 10) : 0;
-            setUndoCount(countToSet);
-            setMaxUndoLimit(3); // Limited to 3
-        }
-
-        // Load swipe history from localStorage
-        const savedSwipeHistory = localStorage.getItem('gameCard_swipeHistory');
-        if (savedSwipeHistory) {
-            try {
-                const parsedHistory = JSON.parse(savedSwipeHistory);
-                setSwipeHistory(parsedHistory);
-            } catch (error) {
-                setSwipeHistory([]);
+        const loadUndoCount = async () => {
+            // Load swipe history from localStorage immediately (no backend equivalent)
+            const savedSwipeHistory = localStorage.getItem('gameCard_swipeHistory');
+            if (savedSwipeHistory) {
+                try {
+                    const parsed = JSON.parse(savedSwipeHistory);
+                    setSwipeHistory(parsed);
+                } catch (_) {
+                    setSwipeHistory([]);
+                }
             }
-        }
 
-    }, [inProgressGames]);
+            // Try to get the authoritative undo count from backend
+            try {
+                const token = localStorage.getItem('authToken');
+                const res = await getUndoUsage(token);
+                if (res?.success && res?.data) {
+                    if (res.data.unlimited === true) {
+                        // No games downloaded yet — unlimited undo/swipe
+                        setIsUnlimitedUndo(true);
+                        console.log('[GameCard][Init] Unlimited undo mode (no games downloaded yet)');
+                    } else if (res.data.undoCount != null) {
+                        const serverCount = res.data.undoCount;
+                        setUndoCount(serverCount);
+                        localStorage.setItem('gameCard_undoCount', serverCount.toString());
+                        console.log(`[GameCard][Init] undoCount from backend: ${serverCount}`);
+                    } else {
+                        throw new Error('no data');
+                    }
+                } else {
+                    throw new Error('no data');
+                }
+            } catch (_) {
+                // Fallback to localStorage if API fails
+                const savedUndoCount = localStorage.getItem('gameCard_undoCount');
+                const countToSet = savedUndoCount ? parseInt(savedUndoCount, 10) : 0;
+                setUndoCount(countToSet);
+                console.log(`[GameCard][Init] undoCount from localStorage fallback: ${countToSet}`);
+            } finally {
+                undoLoadedRef.current = true;
+            }
+        };
 
-    // Save undo count to LOCAL storage (persist across navigation)
+        loadUndoCount();
+    }, []); // runs once on mount only
+
+    // Update undo limit when VIP tier changes — does NOT touch undoCount
     useEffect(() => {
-        if (!isFirstTimeUser) {
-            localStorage.setItem('gameCard_undoCount', undoCount.toString());
-        }
-    }, [undoCount, isFirstTimeUser]);
+        const tier = currentTier
+            ? currentTier.charAt(0).toUpperCase() + currentTier.slice(1).toLowerCase()
+            : 'Free';
+        const limit = UNDO_LIMITS[tier] ?? 1;
+        setMaxUndoLimit(limit);
+        console.log(`[GameCard][VIP] Tier detected: "${currentTier}" → normalized: "${tier}" → maxUndoLimit set to ${limit}`);
+    }, [currentTier]);
 
-    // FIXED: Save swipe history to localStorage to persist across navigation
+    // Save undo count to localStorage — only after initial load to avoid overwriting saved value
     useEffect(() => {
-        if (swipeHistory.length > 0) {
-            localStorage.setItem('gameCard_swipeHistory', JSON.stringify(swipeHistory));
-        }
+        if (!undoLoadedRef.current) return;
+        localStorage.setItem('gameCard_undoCount', undoCount.toString());
+        console.log(`[GameCard][Save] undoCount saved to localStorage: ${undoCount}`);
+    }, [undoCount]);
+
+    // Save swipe history to localStorage (always — including empty so cleared state persists)
+    useEffect(() => {
+        localStorage.setItem('gameCard_swipeHistory', JSON.stringify(swipeHistory));
     }, [swipeHistory]);
 
     // SIMPLE LOGIC: No need for complex state synchronization
@@ -131,10 +154,10 @@ const GameCard = ({ onClose: onCloseProp }) => {
 
     // OPTIMIZED: Memoize swipe handlers to prevent recreation
     const handleSwipeLeft = useCallback(() => {
-        const currentGame = iosSwipeGames[currentGameIndex];
+        const currentGame = swipeGames[currentGameIndex];
 
         // Check if this is the last card
-        if (currentGameIndex >= iosSwipeGames.length - 1) {
+        if (currentGameIndex >= swipeGames.length - 1) {
             // FIXED: Allow unlimited swiping - no undo limit check for swiping
             if (!isLoopMode) {
                 // Show friendly notification for first time reaching last card
@@ -168,11 +191,11 @@ const GameCard = ({ onClose: onCloseProp }) => {
         // SIMPLE LOGIC: No need to change user type during swiping
 
         setCurrentGameIndex(currentGameIndex + 1);
-    }, [currentGameIndex, iosSwipeGames, isLoopMode, logSwipePreference]);
+    }, [currentGameIndex, swipeGames, isLoopMode, logSwipePreference]);
 
 
     const handleSwipeRight = useCallback(() => {
-        const currentGame = iosSwipeGames[currentGameIndex];
+        const currentGame = swipeGames[currentGameIndex];
         if (currentGame) {
             // Log like for recommendation algorithm
             logSwipePreference(currentGame._id || currentGame.id, 'like', currentGame);
@@ -196,47 +219,65 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 // Failed to store game data - silently handle
             }
 
-            // Use 'id' field first (as expected by API), fallback to '_id'
-            const gameId = currentGame.id || currentGame._id || currentGame.gameId;
+            // Use provider gameId (BitLabs/Besitos) for get-game-by-id API; fallback to id/_id
+            const gameId = currentGame.gameId || currentGame.details?.id || currentGame.id || currentGame._id;
             router.push(`/gamedetails?gameId=${gameId}&source=swipe`);
         }
-    }, [currentGameIndex, iosSwipeGames, logSwipePreference, router]);
+    }, [currentGameIndex, swipeGames, logSwipePreference, router]);
 
     const handleUndo = useCallback(() => {
-        // SIMPLE LOGIC: Check if user can undo
-        const canUndo = (maxUndoLimit === -1) || (undoCount < maxUndoLimit);
+        const canUndo = isUnlimitedUndo || undoCount < maxUndoLimit;
+        console.log(`[GameCard][Undo] Attempted — unlimited: ${isUnlimitedUndo}, tier: "${currentTier || 'Free'}", used: ${undoCount}/${maxUndoLimit}, canUndo: ${canUndo}, historyLength: ${swipeHistory.length}`, { currentTier, maxUndoLimit, undoCount });
 
         if (canUndo) {
             if (swipeHistory.length > 0) {
-                // Use swipe history for precise undo
                 const lastSwipe = swipeHistory[swipeHistory.length - 1];
+                console.log(`[GameCard][Undo] Restoring game at index ${lastSwipe.gameIndex} (title: "${lastSwipe.game?.title || 'unknown'}")`);
                 setCurrentGameIndex(lastSwipe.gameIndex);
                 setSwipeHistory(prev => prev.slice(0, -1));
 
-                // Reset last card state if going back to a previous game
                 if (isLastCardReached) {
                     setIsLastCardReached(false);
                     setShowLastCard(false);
                 }
             } else if (currentGameIndex > 0) {
-                // Simple fallback: go back to previous game
+                console.log(`[GameCard][Undo] No history — falling back to index ${currentGameIndex - 1}`);
                 setCurrentGameIndex(currentGameIndex - 1);
+            } else {
+                console.log('[GameCard][Undo] Nothing to undo — no history and at first card');
             }
 
-            // FIXED: Only increment undo count for users with downloaded games
-            if (!isFirstTimeUser) {
-                setUndoCount(undoCount + 1);
+            if (!isUnlimitedUndo) {
+                const newUndoCount = undoCount + 1;
+                setUndoCount(newUndoCount);
+                console.log(`[GameCard][Undo] Success — undoCount now ${newUndoCount}/${maxUndoLimit}`);
+
+                // Track undo usage in backend (fire-and-forget)
+                const restoredGame = swipeHistory.length > 0 ? swipeHistory[swipeHistory.length - 1]?.game : null;
+                trackUndoUsage(
+                    {
+                        gameId: restoredGame?._id || restoredGame?.id || restoredGame?.gameId || null,
+                        gameTitle: restoredGame?.title || null,
+                        undoCount: newUndoCount,
+                        maxUndoLimit: maxUndoLimit,
+                        tier: currentTier
+                            ? currentTier.charAt(0).toUpperCase() + currentTier.slice(1).toLowerCase()
+                            : 'Free',
+                        restoredFromIndex: currentGameIndex,
+                    },
+                    typeof window !== "undefined" ? localStorage.getItem("authToken") : null,
+                ).catch((err) => console.warn('[GameCard][Undo] trackUndoUsage failed (non-critical):', err));
+            } else {
+                console.log('[GameCard][Undo] Success (unlimited mode — no count tracked)');
             }
         } else {
-            // FIXED: Show VIP modal only for users with downloaded games who reached undo limit
-            if (!isFirstTimeUser && undoCount >= maxUndoLimit) {
-                setShowVIPModal(true);
-            }
+            console.log(`[GameCard][Undo] Limit reached (${undoCount}/${maxUndoLimit}) — showing VIP upgrade modal`);
+            setShowVIPModal(true);
         }
-    }, [isFirstTimeUser, maxUndoLimit, undoCount, swipeHistory, isLastCardReached, currentGameIndex]);
+    }, [isUnlimitedUndo, maxUndoLimit, undoCount, swipeHistory, isLastCardReached, currentGameIndex, currentTier]);
 
     const handleDownload = useCallback(async () => {
-        const currentGame = iosSwipeGames[currentGameIndex];
+        const currentGame = swipeGames[currentGameIndex];
         if (currentGame) {
             try {
                 // Use besitosRawData URL if available
@@ -253,7 +294,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 }
             }
         }
-    }, [currentGameIndex, iosSwipeGames, undoCount, swipeHistory.length, isFirstTimeUser]);
+    }, [currentGameIndex, swipeGames, undoCount, swipeHistory.length]);
 
     const handleClose = useCallback(() => {
         // If in loop mode, go back to last game instead of closing
@@ -296,8 +337,20 @@ const GameCard = ({ onClose: onCloseProp }) => {
         handleSwipeLeft(); // Same as swipe left - skip current game and show next
     };
 
+    // X button: skip to next available game only — no loop, no undo history
+    const handleXButton = useCallback(() => {
+        console.log(`[GameCard][X] Pressed — currentIndex: ${currentGameIndex}, total: ${swipeGames.length}`);
+        if (currentGameIndex >= swipeGames.length - 1) {
+            console.log('[GameCard][X] Already at last game — nothing to do');
+            return;
+        }
+        console.log(`[GameCard][X] Moving to index ${currentGameIndex + 1} (NO undo history entry added)`);
+        setCurrentGameIndex(currentGameIndex + 1);
+    }, [currentGameIndex, swipeGames]);
+
     const handleVIPUpgrade = () => {
         setShowVIPModal(false);
+        if (typeof window !== "undefined") sessionStorage.setItem("buySubscriptionFrom", "/homepage");
         router.push('/BuySubscription');
     };
 
@@ -338,91 +391,46 @@ const GameCard = ({ onClose: onCloseProp }) => {
         }
     };
 
-    // STALE-WHILE-REVALIDATE: Always fetch - will use cache if available and fresh
+    // One discover call only on mount. Guard loading/failed to prevent unnecessary calls.
     useEffect(() => {
-        // Always dispatch - stale-while-revalidate will handle cache logic
-        // Pass user object directly - API will extract age and gender dynamically
-        // This ensures:
-        // 1. Shows cached data immediately if available (< 5 min old)
-        // 2. Refreshes in background if cache is stale or 80% expired
-        // 3. Fetches fresh if no cache exists
+        const hasFreshCache = sectionTimestamp != null && Date.now() - sectionTimestamp < CACHE_STALE_MS;
+        if (hasFreshCache || swipeStatus === "loading" || swipeStatus === "failed") return;
         dispatch(fetchGamesBySection({
             uiSection: sectionName,
             user: userProfile,
             page: 1,
             limit: 10
         }));
-    }, [dispatch, sectionName, userProfile]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Keep index in bounds when the filtered list changes (e.g. after fetch)
+    // Return to app (focus): one discover call only if cache older than 2 min. User from localStorage.
     useEffect(() => {
-        if (!iosSwipeGames || iosSwipeGames.length === 0) {
-            if (currentGameIndex !== 0) setCurrentGameIndex(0);
-            return;
-        }
-        if (currentGameIndex > iosSwipeGames.length - 1) {
-            setCurrentGameIndex(0);
-        }
-    }, [iosSwipeGames, currentGameIndex]);
-
-    // Refresh games in background after showing cached data (to get admin updates)
-    // Do this in background without blocking UI - show cached data immediately
-    useEffect(() => {
-        if (!userProfile) return;
-
-        // Use setTimeout to refresh in background after showing cached data
-        // This ensures smooth UX - cached data shows immediately, fresh data loads in background
-        const refreshTimer = setTimeout(() => {
+        const handleRefreshIfStale = () => {
+            const state = require("@/lib/redux/store").store.getState();
+            const ts = state.games.gamesBySectionTimestamp[sectionName];
+            const isStale = !ts || Date.now() - ts > FOCUS_REFRESH_STALE_MS;
+            if (!isStale) return;
+            const user = state.profile.details;
             dispatch(fetchGamesBySection({
                 uiSection: sectionName,
-                user: userProfile,
-                page: 1,
-                limit: 10,
-                force: true,
-                background: true
-            }));
-        }, 100); // Small delay to let cached data render first
-
-        return () => clearTimeout(refreshTimer);
-    }, [dispatch, sectionName, userProfile]);
-
-    // Refresh games in background when app comes to foreground (admin might have updated)
-    useEffect(() => {
-        if (!userProfile) return;
-
-        const handleFocus = () => {
-            dispatch(fetchGamesBySection({
-                uiSection: sectionName,
-                user: userProfile,
+                user: user || null,
                 page: 1,
                 limit: 10,
                 force: true,
                 background: true
             }));
         };
-
+        const handleFocus = () => handleRefreshIfStale();
+        const handleVisibility = () => {
+            if (!document.hidden) handleRefreshIfStale();
+        };
         window.addEventListener("focus", handleFocus);
-
-        const handleVisibilityChange = () => {
-            if (!document.hidden && userProfile) {
-                dispatch(fetchGamesBySection({
-                    uiSection: sectionName,
-                    user: userProfile,
-                    page: 1,
-                    limit: 10,
-                    force: true,
-                    background: true
-                }));
-            }
-        };
-
-        document.addEventListener("visibilitychange", handleVisibilityChange);
-
+        document.addEventListener("visibilitychange", handleVisibility);
         return () => {
             window.removeEventListener("focus", handleFocus);
-            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            document.removeEventListener("visibilitychange", handleVisibility);
         };
-    }, [dispatch, sectionName, userProfile]);
+    }, [dispatch, sectionName]);
 
     useEffect(() => {
         const handleClickOutside = (event) => {
@@ -442,15 +450,17 @@ const GameCard = ({ onClose: onCloseProp }) => {
             id: 1,
             src: "https://c.animaapp.com/DfFsihWg/img/group-2@2x.png",
             alt: "Close",
-            onClick: handleUndo,
+            position: "left-0",
+            onClick: handleXButton,
         },
         {
             id: 2,
             src: "https://c.animaapp.com/DfFsihWg/img/group-4@2x.png",
             alt: "Undo",
+            position: "left-24",
             label: {
-                current: isFirstTimeUser ? '∞' : (maxUndoLimit === -1 ? '∞' : maxUndoLimit - undoCount),
-                total: isFirstTimeUser ? '∞' : (maxUndoLimit === -1 ? '∞' : maxUndoLimit)
+                current: isUnlimitedUndo ? '∞' : Math.max(0, maxUndoLimit - undoCount),
+                total: isUnlimitedUndo ? '∞' : maxUndoLimit,
             },
             onClick: handleUndo,
         },
@@ -458,6 +468,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
             id: 3,
             src: "https://c.animaapp.com/DfFsihWg/img/group-3@2x.png",
             alt: "Download",
+            position: "left-48",
             onClick: handleDownload,
         },
         // {
@@ -489,75 +500,54 @@ const GameCard = ({ onClose: onCloseProp }) => {
 
     // OPTIMIZED: Memoize current game data to prevent recalculation
     const currentGame = useMemo(() => {
-        return iosSwipeGames[currentGameIndex];
-    }, [iosSwipeGames, currentGameIndex]);
+        return swipeGames[currentGameIndex];
+    }, [swipeGames, currentGameIndex]);
 
-    // Calculate coins and total XP for current game (same logic as TaskListSection and HighestEarningGame)
+    // Calculate coins and total XP for current game (normalizer prefers API rewards.coins / rewards.xp)
     const currentGameRewards = useMemo(() => {
         if (!currentGame) return { coins: 0, totalXP: 0 };
-
-        const rawData = currentGame.besitosRawData || {};
-
-        // Calculate coins - use rewards.coins first (from API), then fallback to amount
-        // Priority: rewards.coins > besitosRawData.amount > game.amount
-        const coinAmount = currentGame.rewards?.coins || rawData.amount || currentGame.amount || 0;
-        const coins = typeof coinAmount === 'number' ? coinAmount : (typeof coinAmount === 'string' ? parseFloat(coinAmount.replace('$', '')) || 0 : 0);
-
-        // Calculate total XP with progressive multiplier (same as game details page)
-        // Task 1: baseXP × multiplier^0
-        // Task 2: baseXP × multiplier^1
-        // Task 3: baseXP × multiplier^2
-        // ...
-        // Total = sum of all task XPs
-        let totalXP = 0;
-        if (currentGame.rewards?.xp) {
-            // Use rewards.xp if available
-            totalXP = currentGame.rewards.xp;
-        } else {
-            // Calculate from xpRewardConfig with progressive multiplier
-            const xpConfig = currentGame.xpRewardConfig || { baseXP: 1, multiplier: 1 };
-            const baseXP = xpConfig.baseXP || 1;
-            const multiplier = xpConfig.multiplier || 1;
-
-            // Get total number of tasks/goals
-            const goals = rawData.goals || currentGame.goals || [];
-            const totalTasks = goals.length || 0;
-
-            // Calculate total XP: sum of baseXP × multiplier^taskIndex for all tasks
-            // This is a geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1) when multiplier ≠ 1
-            // When multiplier = 1, it's just baseXP × totalTasks
-            if (multiplier === 1) {
-                // Simple case: all tasks have same XP
-                totalXP = baseXP * totalTasks;
-            } else if (totalTasks > 0) {
-                // Geometric series: baseXP × (multiplier^totalTasks - 1) / (multiplier - 1)
-                totalXP = baseXP * (Math.pow(multiplier, totalTasks) - 1) / (multiplier - 1);
-            }
+        try {
+            const { getTotalPromisedPoints } = require("@/lib/gameDataNormalizer");
+            const { totalCoins, totalXP } = getTotalPromisedPoints(currentGame);
+            const coins = typeof totalCoins === "number" ? totalCoins : (parseFloat(totalCoins) || 0);
+            const xp = typeof totalXP === "number" ? totalXP : (parseFloat(totalXP) || 0);
+            return { coins, totalXP: xp };
+        } catch (e) {
+            const coinAmount = currentGame.rewards?.coins ?? currentGame.rewards?.gold ?? currentGame.besitosRawData?.amount ?? currentGame.amount ?? 0;
+            const coins = typeof coinAmount === "number" ? coinAmount : (parseFloat(String(coinAmount).replace("$", "")) || 0);
+            const xp = currentGame.rewards?.xp ?? 0;
+            return { coins, totalXP: typeof xp === "number" ? xp : (parseFloat(xp) || 0) };
         }
-
-        return {
-            coins: coins,
-            totalXP: Math.floor(totalXP)
-        };
     }, [currentGame]);
 
+    const formatCoins = (n) => (Number(n) === Math.round(Number(n)) ? String(Math.round(Number(n))) : Number(n).toFixed(2));
+    const formatXP = (n) => String(Math.round(Number(n)) || 0);
 
-    // OPTIMIZED: Memoize game data processing with image optimization - using besitosRawData
+
+    // OPTIMIZED: Memoize game data processing with image optimization - using normalizer for both besitos and bitlab
     const gameData = useMemo(() => {
         if (!currentGame) return null;
 
-        // Use besitosRawData if available, otherwise fallback to existing structure
-        const rawData = currentGame.besitosRawData || {};
+        // Import normalizer functions
+        const { normalizeGameImages, normalizeGameTitle, normalizeGameDescription, normalizeGameCategory, normalizeGameAmount } = require('@/lib/gameDataNormalizer');
 
-        // OPTIMIZED: Prioritize smaller images for faster loading - use besitosRawData first
+        // Normalize game data for both besitos and bitlab
+        const images = normalizeGameImages(currentGame);
+        const title = normalizeGameTitle(currentGame);
+        const description = normalizeGameDescription(currentGame);
+        const category = normalizeGameCategory(currentGame);
+        const amount = normalizeGameAmount(currentGame);
+
+        // OPTIMIZED: Prioritize smaller images for faster loading
         const getOptimizedImage = () => {
             const imageSources = [
-                rawData.square_image, // From besitosRawData
-                rawData.image, // From besitosRawData
+                images.square_image,
+                images.icon,
+                images.banner,
+                images.large_image,
                 currentGame?.images?.square_image,
                 currentGame?.images?.banner,
                 currentGame?.images?.large_image,
-                rawData.large_image, // From besitosRawData
                 currentGame?.image,
                 currentGame?.square_image,
                 currentGame?.details?.image
@@ -567,22 +557,22 @@ const GameCard = ({ onClose: onCloseProp }) => {
         };
 
         return {
-            title: rawData.title || currentGame.details?.name || currentGame.title || 'Unknown Game',
+            title: title,
             image: getOptimizedImage(),
-            description: rawData.description || currentGame.details?.description || currentGame.description || '',
-            category: rawData.categories?.[0]?.name || currentGame.category || 'Games',
-            genre: rawData.categories?.[0]?.name || currentGame.genre || 'Casual',
+            description: description,
+            category: category,
+            genre: category,
             id: currentGame._id || currentGame.id || currentGame.gameId,
-            amount: rawData.amount || currentGame.rewards?.coins,
+            amount: amount,
             fullGameData: currentGame // Store full game including besitosRawData
         };
     }, [currentGame]);
 
     // OPTIMIZED: Preload next game image for smoother transitions
     useEffect(() => {
-        if (iosSwipeGames && iosSwipeGames.length > 1) {
-            const nextGameIndex = (currentGameIndex + 1) % iosSwipeGames.length;
-            const nextGame = iosSwipeGames[nextGameIndex];
+        if (swipeGames && swipeGames.length > 1) {
+            const nextGameIndex = (currentGameIndex + 1) % swipeGames.length;
+            const nextGame = swipeGames[nextGameIndex];
 
             if (nextGame) {
                 const nextImage = nextGame.images?.square_image || nextGame.images?.banner || nextGame.image;
@@ -592,7 +582,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 }
             }
         }
-    }, [currentGameIndex, iosSwipeGames]);
+    }, [currentGameIndex, swipeGames]);
 
     // OPTIMIZED: Reset image loading state when game changes
     useEffect(() => {
@@ -603,32 +593,17 @@ const GameCard = ({ onClose: onCloseProp }) => {
     // Show last card if user clicked "Got it"
     if (showLastCard && isLastCardReached) {
         return (
-            <main className="relative w-[335px] min-h-[600px] mx-auto mb-3" data-model-id="2035:14588">
-                {/* Action buttons section - only show close button - moved further below footer with more spacing */}
-                <section
-                    className="absolute w-full max-w-[335px] h-[62px] top-[520px] left-1/2 -translate-x-1/2 flex items-center justify-center gap-4 px-4"
-                    aria-label="Action buttons"
-                >
-                    <button
-                        className="relative w-[62px] h-[62px] hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 rounded-full"
-                        aria-label="Close"
-                        onClick={handleClose}
-                    >
-                        <img className="w-full h-full" alt="Close" src="https://c.animaapp.com/DfFsihWg/img/group-2@2x.png" loading="eager" decoding="async" width="62" height="62" />
-                    </button>
-                </section>
-
+            <main className="relative flex flex-col items-center w-full max-w-[335px] mx-auto min-h-[549px]" data-model-id="2035:14588">
                 {/* Last card display */}
-                <article className="absolute w-[335px] h-[429px] top-0 left-0 rounded-[12px_12px_0px_0px] overflow-hidden shadow-[0px_27.92px_39.88px_#4d0d3399] bg-[linear-gradient(180deg,rgba(95,14,58,1)_0%,rgba(16,8,25,1)_100%)]">
-                    <section className="absolute w-[400px] h-[303px] top-[90px] ">
+                <article className="relative w-full max-w-[335px] h-[429px] flex-shrink-0 rounded-[12px_12px_0px_0px] overflow-hidden shadow-[0px_27.92px_39.88px_#4d0d3399] bg-[linear-gradient(180deg,rgba(95,14,58,1)_0%,rgba(16,8,25,1)_100%)]">
+                    <section className="absolute left-1/2 -translate-x-1/2 w-[400px] max-w-[120%] h-[303px] top-[90px]">
                         {/* REMOVED: Image loading state for better Android UX */}
                         <img
-                            className="absolute w-[400px] h-[344px] top-[-2px]  aspect-[1] object-cover "
+                            className="absolute w-[400px] max-w-full h-[344px] top-[-2px] aspect-[1] object-cover"
                             alt={`${gameData?.title || 'Game'} artwork`}
                             src={gameData?.image || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png"}
                             loading="eager"
                             decoding="async"
-                            fetchPriority="high"
                             onLoad={() => setImageLoading(false)}
                             onError={(e) => {
                                 setImageError(true);
@@ -658,10 +633,10 @@ const GameCard = ({ onClose: onCloseProp }) => {
                     </section>
 
                     {/* Header message */}
-                    <header className="absolute w-[334px] h-[88px] -top-0.5 left-0">
-                        <div className="relative w-[335px] h-[87px] top-px bg-[#442a3b] rounded-[10px_10px_0px_0px]">
+                    <header className="absolute w-full h-[88px] -top-0.5 left-0 right-0">
+                        <div className="relative w-full h-[87px] top-px bg-[#442a3b] rounded-[10px_10px_0px_0px]">
                             <p
-                                className="absolute w-[304px] top-3.5 left-[15px] [font-family:'Poppins',Helvetica] font-normal text-white text-base text-center tracking-[0] leading-[1.4] break-words hyphens-auto"
+                                className="absolute w-[calc(100%-30px)] max-w-[304px] left-[15px] top-3.5 [font-family:'Poppins',Helvetica] font-normal text-white text-base text-center tracking-[0] leading-[1.4] break-words hyphens-auto"
                                 style={{
                                     wordBreak: 'break-word',
                                     overflowWrap: 'break-word',
@@ -679,12 +654,12 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 </article>
 
                 {/* Footer */}
-                <footer className="absolute w-[335px] min-h-[80px] top-[429px] left-0 rounded-[0px_0px_10px_10px] overflow-hidden bg-[linear-gradient(180deg,rgba(158,173,247,0.4)_0%,rgba(113,106,231,0.4)_100%)] flex items-center justify-between py-3 safe-area-inset" style={{ paddingLeft: '7px', paddingRight: '6px' }}>
-                    <div className="flex flex-col text-white [font-family:'Poppins',Helvetica] flex-1 min-w-0 gap-1" style={{ minWidth: '200px', minHeight: '50px', maxWidth: 'calc(100% - 40px)' }}>
+                <footer className="relative w-full flex-shrink-0 rounded-[0px_0px_10px_10px] overflow-hidden bg-[linear-gradient(180deg,rgba(158,173,247,0.4)_0%,rgba(113,106,231,0.4)_100%)] flex items-start px-3 py-3">
+                    <div className="flex flex-col text-white [font-family:'Poppins',Helvetica] flex-1 min-w-0 gap-1 pr-10">
                         {/* Line 1: Game Name */}
-                        <div className="flex items-start gap-2 w-full">
+                        <div className="flex items-start w-full min-w-0">
                             <h3
-                                className="font-bold text-base sm:text-lg leading-[1.3] text-white break-words hyphens-auto w-full"
+                                className="font-bold text-base leading-[1.3] text-white break-words hyphens-auto w-full"
                                 style={{
                                     wordBreak: 'break-word',
                                     overflowWrap: 'break-word',
@@ -696,8 +671,6 @@ const GameCard = ({ onClose: onCloseProp }) => {
                                     lineHeight: '1.3',
                                     letterSpacing: '0.01em',
                                     textAlign: 'left',
-                                    width: '100%',
-                                    maxWidth: '100%'
                                 }}
                             >
                                 {(() => {
@@ -708,13 +681,13 @@ const GameCard = ({ onClose: onCloseProp }) => {
                             </h3>
                         </div>
                         {/* Line 2: Complete task and earn */}
-                        <div className="flex items-center text-sm sm:text-base leading-[1.4]">
+                        <div className="flex items-center text-sm leading-[1.4]">
                             <span className="text-white/90 font-normal">Complete task and earn</span>
                         </div>
                         {/* Line 3: Coins and XP points */}
-                        <div className="flex items-center gap-2 text-sm sm:text-base leading-[1.4]">
+                        <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-sm leading-[1.4]">
                             <div className="flex items-center gap-1.5 flex-shrink-0">
-                                <span className="font-semibold text-white whitespace-nowrap">{currentGameRewards.coins || 0}</span>
+                                <span className="font-semibold text-white whitespace-nowrap">{formatCoins(currentGameRewards.coins)}</span>
                                 <img
                                     className="w-5 h-5 flex-shrink-0"
                                     alt="Coin icon"
@@ -727,7 +700,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
                             </div>
                             <span className="text-white/90 font-medium flex-shrink-0">&</span>
                             <div className="flex items-center gap-1.5 flex-shrink-0">
-                                <span className="font-semibold text-white whitespace-nowrap">{currentGameRewards.totalXP || 0}</span>
+                                <span className="font-semibold text-white whitespace-nowrap">{formatXP(currentGameRewards.totalXP)}</span>
                                 <img
                                     className="w-5 h-5 flex-shrink-0"
                                     alt="XP icon"
@@ -744,7 +717,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
 
                     <button
                         onClick={toggleTooltip}
-                        className="absolute w-8 h-8 top-[9px] right-[-2px] z-20 cursor-pointer hover:opacity-80 transition-opacity duration-200 rounded-tl-lg rounded-bl-lg overflow-hidden flex items-center justify-center"
+                        className="absolute w-8 h-8 top-2 right-[-4px] z-20 cursor-pointer hover:opacity-80 transition-opacity duration-200 rounded-tl-lg rounded-bl-lg overflow-hidden flex items-center justify-center"
                         aria-label="More information"
                     >
                         <svg width="24" height="24" viewBox="0 0 33 34" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -754,10 +727,21 @@ const GameCard = ({ onClose: onCloseProp }) => {
                     </button>
                 </footer>
 
+                {/* Action buttons - close only */}
+                <section className="flex flex-row justify-center items-center w-full py-4 flex-shrink-0" aria-label="Action buttons">
+                    <button
+                        className="relative w-[62px] h-[62px] flex-shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 rounded-full"
+                        aria-label="Close"
+                        onClick={handleClose}
+                    >
+                        <img className="w-full h-full" alt="Close" src="https://c.animaapp.com/DfFsihWg/img/group-2@2x.png" loading="eager" decoding="async" width="62" height="62" />
+                    </button>
+                </section>
+
                 {showTooltip && (
                     <div
                         ref={tooltipRef}
-                        className="absolute top-[472px] right-[-8px] z-50 w-[320px] bg-black/95 backdrop-blur-sm rounded-[12px] px-4 py-3 shadow-2xl border border-gray-600/50 animate-fade-in"
+                        className="absolute top-[472px] right-[-8px] z-50 w-[320px] max-w-[calc(100vw-2rem)] bg-black/95 backdrop-blur-sm rounded-[12px] px-4 py-3 shadow-2xl border border-gray-600/50 animate-fade-in"
                     >
                         <div className="text-white font-medium text-sm [font-family:'Poppins',Helvetica] leading-normal">
                             <div className="text-center text-gray-200">
@@ -776,26 +760,32 @@ const GameCard = ({ onClose: onCloseProp }) => {
         return null;
     }
 
-    // Show empty state if no games available
-    if (!iosSwipeGames || iosSwipeGames.length === 0) {
+    // Show empty state if no games available - same compact height pattern as NonGameOffersSection / SurveysSection
+    if (!swipeGames || swipeGames.length === 0) {
         return (
-            <div className="flex flex-col items-center justify-center w-[335px] min-h-[549px] mx-auto mb-3 p-6">
-                <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-white text-xl mb-2 text-center">
-                    Gaming - Swipe
-                </h2>
-                <p className="[font-family:'Poppins',Helvetica] font-normal text-gray-400 text-base text-center">
-                    No games available
-                </p>
+            <div className="w-full max-w-[335px] mx-auto min-h-[5rem] flex items-center justify-center">
+                <div className="flex flex-col items-center justify-center py-6 px-4">
+                    <h2 className="[font-family:'Poppins',Helvetica] font-semibold text-white text-xl mb-2 text-center">
+                        Gaming - Swipe
+                    </h2>
+                    <p className="[font-family:'Poppins',Helvetica] font-normal text-gray-400 text-base text-center">
+                        No games available
+                    </p>
+                </div>
             </div>
         );
     }
 
     return (
-        <main className="relative w-[335px] min-h-[600px] mx-auto mb-3 animate-fade-in" data-model-id="2035:14588">
+        <main
+            className="relative flex flex-col items-center w-full max-w-[335px] mx-auto animate-fade-in min-h-[549px]"
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 549 }}
+            data-model-id="2035:14588"
+        >
             {/* Main game card */}
             <article
                 ref={cardRef}
-                className="absolute w-[335px] h-[429px] top-0 left-0 rounded-[12px_12px_0px_0px] cursor-grab active:cursor-grabbing"
+                className="relative w-full max-w-[335px] h-[429px] rounded-[12px_12px_0px_0px] cursor-grab active:cursor-grabbing"
                 onMouseDown={(e) => handleStart(e.clientX)}
                 onMouseMove={(e) => handleMove(e.clientX)}
                 onMouseUp={handleEnd}
@@ -804,6 +794,8 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 onTouchMove={(e) => handleMove(e.touches[0].clientX)}
                 onTouchEnd={handleEnd}
                 style={{
+                    flex: '0 0 429px',
+                    minHeight: 429,
                     transform: isDragging ? `translateX(${currentX - startX}px)` : 'translateX(0)',
                     transition: isDragging ? 'none' : 'transform 0.3s ease-out'
                 }}
@@ -811,18 +803,17 @@ const GameCard = ({ onClose: onCloseProp }) => {
 
                 {/* Main card container */}
                 <div
-                    className="absolute w-[335px] h-[429px] top-0 left-0 rounded-[12px_12px_0px_0px] overflow-hidden shadow-[0px_27.92px_39.88px_#4d0d3399] bg-[linear-gradient(180deg,rgba(95,14,58,1)_0%,rgba(16,8,25,1)_100%)] cursor-pointer hover:opacity-95 transition-opacity duration-200"
+                    className="absolute inset-0 w-full h-full rounded-[12px_12px_0px_0px] overflow-hidden shadow-[0px_27.92px_39.88px_#4d0d3399] bg-[linear-gradient(180deg,rgba(95,14,58,1)_0%,rgba(16,8,25,1)_100%)] cursor-pointer hover:opacity-95 transition-opacity duration-200"
                     onClick={handleGameCardClick}
                 >
-                    <section className="absolute w-[400px] h-[303px] top-[90px] ">
+                    <section className="absolute left-1/2 -translate-x-1/2 w-[400px] max-w-[120%] h-[303px] top-[90px]">
                         {/* REMOVED: Image loading state for better Android UX */}
                         <img
-                            className="absolute w-[400px] h-[344px] top-[-2px] object-cover  "
+                            className="absolute w-[400px] max-w-full h-[344px] top-[-2px] object-cover"
                             alt={`${gameData?.title || 'Game'} artwork`}
                             src={gameData?.image || "https://c.animaapp.com/DfFsihWg/img/image-3930@2x.png"}
                             loading="eager"
                             decoding="async"
-                            fetchPriority="high"
                             onLoad={() => setImageLoading(false)}
                             onError={(e) => {
                                 setImageError(true);
@@ -839,10 +830,10 @@ const GameCard = ({ onClose: onCloseProp }) => {
                     </section>
 
                     {/* Header message */}
-                    <header className="absolute w-[334px] h-[88px] -top-0.5 left-0">
-                        <div className={`relative w-[335px] h-[87px] top-px rounded-[10px_10px_0px_0px] ${isLoopMode ? 'bg-gradient-to-r from-purple-600/80 to-pink-600/80' : 'bg-[#442a3b]'}`}>
+                    <header className="absolute w-full h-[88px] -top-0.5 left-0 right-0">
+                        <div className={`relative w-full h-[87px] top-px rounded-[10px_10px_0px_0px] ${isLoopMode ? 'bg-gradient-to-r from-purple-600/80 to-pink-600/80' : 'bg-[#442a3b]'}`}>
                             <p
-                                className="absolute w-[304px] top-3.5 left-[15px] [font-family:'Poppins',Helvetica] font-normal text-white text-base text-center tracking-[0] leading-[1.4] break-words hyphens-auto"
+                                className="absolute w-[calc(100%-30px)] max-w-[304px] left-[15px] top-3.5 [font-family:'Poppins',Helvetica] font-normal text-white text-base text-center tracking-[0] leading-[1.4] break-words hyphens-auto"
                                 style={{
                                     wordBreak: 'break-word',
                                     overflowWrap: 'break-word',
@@ -873,125 +864,124 @@ const GameCard = ({ onClose: onCloseProp }) => {
                 </div>
             </article>
             <>
-                <footer className="absolute w-[335px] min-h-[80px] top-[429px] left-0 rounded-[0px_0px_10px_10px] overflow-hidden bg-[linear-gradient(180deg,rgba(158,173,247,0.4)_0%,rgba(113,106,231,0.4)_100%)] flex items-center justify-between py-3 safe-area-inset" style={{ paddingLeft: '7px', paddingRight: '6px' }}>
-                    <div className="flex flex-col text-white [font-family:'Poppins',Helvetica] flex-1 min-w-0 gap-1" style={{ minWidth: '200px', minHeight: '50px', maxWidth: 'calc(100% - 40px)' }}>
-                        {/* Line 1: Game Name */}
-                        <div className="flex items-start gap-2 w-full">
-                            <h3
-                                className="font-bold text-base sm:text-lg leading-[1.3] text-white break-words hyphens-auto w-full"
-                                style={{
-                                    wordBreak: 'break-word',
-                                    overflowWrap: 'break-word',
-                                    WebkitLineClamp: 2,
-                                    WebkitBoxOrient: 'vertical',
-                                    display: '-webkit-box',
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    lineHeight: '1.3',
-                                    letterSpacing: '0.01em',
-                                    textAlign: 'left',
-                                    width: '100%',
-                                    maxWidth: '100%'
-                                }}
-                            >
-                                {(() => {
-                                    const gameName = currentGame?.details?.name || currentGame?.title || gameData?.title || "Game";
-                                    const cleanGameName = gameName.split(' - ')[0].split(':')[0].trim();
-                                    return cleanGameName;
-                                })()}
-                            </h3>
-                        </div>
-                        {/* Line 2: Complete task and earn */}
-                        <div className="flex items-center text-sm sm:text-base leading-[1.4]">
-                            <span className="text-white/90 font-normal">Complete task and earn</span>
-                        </div>
-                        {/* Line 3: Coins and XP points */}
-                        <div className="flex items-center gap-2 text-sm sm:text-base leading-[1.4]">
-                            <div className="flex items-center gap-1.5 flex-shrink-0">
-                                <span className="font-semibold text-white whitespace-nowrap">{currentGameRewards.coins || 0}</span>
-                                <img
-                                    className="w-5 h-5 flex-shrink-0"
-                                    alt="Coin icon"
-                                    src="/dollor.png"
-                                    loading="eager"
-                                    decoding="async"
-                                    width="20"
-                                    height="20"
-                                />
+                <div className="flex flex-col flex-shrink-0 w-full max-w-[335px] items-center" style={{ flex: '0 0 auto' }}>
+                    <footer className="relative w-full rounded-[0px_0px_10px_10px] overflow-hidden bg-[linear-gradient(180deg,rgba(158,173,247,0.4)_0%,rgba(113,106,231,0.4)_100%)] flex items-start px-3 py-3" style={{ flex: '0 0 auto' }}>
+                        <div className="flex flex-col text-white [font-family:'Poppins',Helvetica] flex-1 min-w-0 gap-1 pr-10">
+                            {/* Line 1: Game Name */}
+                            <div className="flex items-start w-full min-w-0">
+                                <h3
+                                    className="font-bold text-base leading-[1.3] text-white break-words hyphens-auto w-full"
+                                    style={{
+                                        wordBreak: 'break-word',
+                                        overflowWrap: 'break-word',
+                                        WebkitLineClamp: 2,
+                                        WebkitBoxOrient: 'vertical',
+                                        display: '-webkit-box',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        lineHeight: '1.3',
+                                        letterSpacing: '0.01em',
+                                        textAlign: 'left',
+                                    }}
+                                >
+                                    {(() => {
+                                        const gameName = currentGame?.details?.name || currentGame?.title || gameData?.title || "Game";
+                                        const cleanGameName = gameName.split(' - ')[0].split(':')[0].trim();
+                                        return cleanGameName;
+                                    })()}
+                                </h3>
                             </div>
-                            <span className="text-white/70 font-medium flex-shrink-0">&</span>
-                            <div className="flex items-center gap-1.5 flex-shrink-0">
-                                <span className="font-semibold text-white whitespace-nowrap">{currentGameRewards.totalXP || 0}</span>
-                                <img
-                                    className="w-5 h-5 flex-shrink-0"
-                                    alt="XP icon"
-                                    src="/xp.svg"
-                                    loading="eager"
-                                    decoding="async"
-                                    width="20"
-                                    height="20"
-                                />
+                            {/* Line 2: Complete task and earn */}
+                            <div className="flex items-center text-sm leading-[1.4]">
+                                <span className="text-white/90 font-normal">Complete task and earn</span>
                             </div>
-                            <span className="text-white/90 font-medium">points</span>
-                        </div>
-                    </div>
-
-                    <button
-                        onClick={toggleTooltip}
-                        className="absolute w-8 h-8 top-[9px] right-[-2px] z-20 cursor-pointer hover:opacity-80 transition-opacity duration-200 rounded-tl-lg rounded-bl-lg overflow-hidden flex items-center justify-center"
-                        aria-label="More information"
-                    >
-                        <svg width="24" height="24" viewBox="0 0 33 34" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M0 0L25 0C29.4183 0 33 3.58172 33 8V34H8C3.58172 34 0 30.4183 0 26L0 0Z" fill="#6E6069" />
-                            <path fillRule="evenodd" clipRule="evenodd" d="M26.8949 16.8292C26.8949 19.7148 25.7823 22.4821 23.802 24.5225C21.8216 26.5629 19.1356 27.7092 16.3349 27.7092C13.5342 27.7092 10.8482 26.5629 8.86786 24.5225C6.88747 22.4821 5.7749 19.7148 5.7749 16.8292C5.7749 13.9437 6.88747 11.1763 8.86786 9.1359C10.8482 7.0955 13.5342 5.94922 16.3349 5.94922C19.1356 5.94922 21.8216 7.0955 23.802 9.1359C25.7823 11.1763 26.8949 13.9437 26.8949 16.8292ZM17.6549 11.3892C17.6549 11.7499 17.5158 12.0958 17.2683 12.3509C17.0207 12.6059 16.685 12.7492 16.3349 12.7492C15.9848 12.7492 15.6491 12.6059 15.4015 12.3509C15.154 12.0958 15.0149 11.7499 15.0149 11.3892C15.0149 11.0285 15.154 10.6826 15.4015 10.4276C15.6491 10.1725 15.9848 10.0292 16.3349 10.0292C16.685 10.0292 17.0207 10.1725 17.2683 10.4276C17.5158 10.6826 17.6549 11.0285 17.6549 11.3892ZM15.0149 15.4692C14.6648 15.4692 14.3291 15.6125 14.0815 15.8676C13.834 16.1226 13.6949 16.4685 13.6949 16.8292C13.6949 17.1899 13.834 17.5358 14.0815 17.7909C14.3291 18.0459 14.6648 18.1892 15.0149 18.1892V22.2692C15.0149 22.6299 15.154 22.9758 15.4015 23.2309C15.6491 23.4859 15.9848 23.6292 16.3349 23.6292H17.6549C18.005 23.6292 18.3407 23.4859 18.5883 23.2309C18.8358 22.9758 18.9749 22.6299 18.9749 22.2692C18.9749 21.9085 18.8358 21.5626 18.5883 21.3076C18.3407 21.0525 18.005 20.9092 17.6549 20.9092V16.8292C17.6549 16.4685 17.5158 16.1226 17.2683 15.8676C17.0207 15.6125 16.685 15.4692 16.3349 15.4692H15.0149Z" fill="white" fillOpacity="0.6" />
-                        </svg>
-                    </button>
-                </footer>
-
-                {/* Action buttons section - positioned after footer */}
-                <section
-                    className="absolute w-full max-w-[335px] h-[62px] top-[520px] left-1/2 -translate-x-1/2 flex items-center justify-center gap-4 px-4"
-                    aria-label="Action buttons"
-                >
-                    {actionButtons.map((button) => (
-                        <button
-                            key={button.id}
-                            className="relative w-[62px] h-[62px] hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 rounded-full"
-                            aria-label={button.alt}
-                            onClick={button.onClick}
-                        >
-                            <img className="w-full h-full" alt={button.alt} src={button.src} loading="lazy" decoding="async" width="62" height="62" />
-
-                            {/* Conditionally render the label if `hasLabel` is true */}
-                            {button.label && (
-                                <div className="absolute bottom-[-18px] left-1/2 -translate-x-1/2 z-10 flex items-center justify-center">
-                                    <UndoActionLabel
-                                        current={button.label.current}
-                                        total={button.label.total} />
+                            {/* Line 3: Coins and XP points */}
+                            <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-sm leading-[1.4]">
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    <span className="font-semibold text-white whitespace-nowrap">{formatCoins(currentGameRewards.coins)}</span>
+                                    <img
+                                        className="w-5 h-5 flex-shrink-0"
+                                        alt="Coin icon"
+                                        src="/dollor.png"
+                                        loading="eager"
+                                        decoding="async"
+                                        width="20"
+                                        height="20"
+                                    />
                                 </div>
-                            )}
+                                <span className="text-white/70 font-medium flex-shrink-0">&</span>
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    <span className="font-semibold text-white whitespace-nowrap">{formatXP(currentGameRewards.totalXP)}</span>
+                                    <img
+                                        className="w-5 h-5 flex-shrink-0"
+                                        alt="XP icon"
+                                        src="/xp.svg"
+                                        loading="eager"
+                                        decoding="async"
+                                        width="20"
+                                        height="20"
+                                    />
+                                </div>
+                                <span className="text-white/90 font-medium">points</span>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={toggleTooltip}
+                            className="absolute w-8 h-8 top-2 right-[-4px] z-20 cursor-pointer hover:opacity-80 transition-opacity duration-200 rounded-tl-lg rounded-bl-lg overflow-hidden flex items-center justify-center"
+                            aria-label="More information"
+                        >
+                            <svg width="24" height="24" viewBox="0 0 33 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M0 0L25 0C29.4183 0 33 3.58172 33 8V34H8C3.58172 34 0 30.4183 0 26L0 0Z" fill="#6E6069" />
+                                <path fillRule="evenodd" clipRule="evenodd" d="M26.8949 16.8292C26.8949 19.7148 25.7823 22.4821 23.802 24.5225C21.8216 26.5629 19.1356 27.7092 16.3349 27.7092C13.5342 27.7092 10.8482 26.5629 8.86786 24.5225C6.88747 22.4821 5.7749 19.7148 5.7749 16.8292C5.7749 13.9437 6.88747 11.1763 8.86786 9.1359C10.8482 7.0955 13.5342 5.94922 16.3349 5.94922C19.1356 5.94922 21.8216 7.0955 23.802 9.1359C25.7823 11.1763 26.8949 13.9437 26.8949 16.8292ZM17.6549 11.3892C17.6549 11.7499 17.5158 12.0958 17.2683 12.3509C17.0207 12.6059 16.685 12.7492 16.3349 12.7492C15.9848 12.7492 15.6491 12.6059 15.4015 12.3509C15.154 12.0958 15.0149 11.7499 15.0149 11.3892C15.0149 11.0285 15.154 10.6826 15.4015 10.4276C15.6491 10.1725 15.9848 10.0292 16.3349 10.0292C16.685 10.0292 17.0207 10.1725 17.2683 10.4276C17.5158 10.6826 17.6549 11.0285 17.6549 11.3892ZM15.0149 15.4692C14.6648 15.4692 14.3291 15.6125 14.0815 15.8676C13.834 16.1226 13.6949 16.4685 13.6949 16.8292C13.6949 17.1899 13.834 17.5358 14.0815 17.7909C14.3291 18.0459 14.6648 18.1892 15.0149 18.1892V22.2692C15.0149 22.6299 15.154 22.9758 15.4015 23.2309C15.6491 23.4859 15.9848 23.6292 16.3349 23.6292H17.6549C18.005 23.6292 18.3407 23.4859 18.5883 23.2309C18.8358 22.9758 18.9749 22.6299 18.9749 22.2692C18.9749 21.9085 18.8358 21.5626 18.5883 21.3076C18.3407 21.0525 18.005 20.9092 17.6549 20.9092V16.8292C17.6549 16.4685 17.5158 16.1226 17.2683 15.8676C17.0207 15.6125 16.685 15.4692 16.3349 15.4692H15.0149Z" fill="white" fillOpacity="0.6" />
+                            </svg>
                         </button>
-                    ))}
-                </section>
+                    </footer>
+
+                    {/* Action buttons section - flex row, min-height so Android doesn't collapse */}
+                    <section
+                        className="flex flex-row justify-center items-center gap-6 w-full py-4 flex-shrink-0 min-h-[90px]"
+                        aria-label="Action buttons"
+                        style={{ flex: '0 0 auto' }}
+                    >
+                        {actionButtons.map((button) => (
+                            <button
+                                key={button.id}
+                                className="relative w-[62px] h-[62px] flex-shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 rounded-full"
+                                aria-label={button.alt}
+                                onClick={button.onClick}
+                            >
+                                <img className="w-full h-full" alt={button.alt} src={button.src} loading="eager" decoding="async" width="62" height="62" />
+
+                                {/* Conditionally render the label if `hasLabel` is true */}
+                                {button.label && (
+                                    <div className="absolute bottom-[-18px] left-1/2 -translate-x-1/2 z-10 flex items-center justify-center">
+                                        <UndoActionLabel
+                                            current={button.label.current}
+                                            total={button.label.total} />
+                                    </div>
+                                )}
+                            </button>
+                        ))}
+                    </section>
+                </div>
 
                 {showTooltip && (
                     <div
                         ref={tooltipRef}
-                        className="absolute top-[472px] right-[-8px] z-50 w-[320px] bg-black/95 backdrop-blur-sm rounded-[12px] px-4 py-3 shadow-2xl border border-gray-600/50 animate-fade-in"
+                        className="absolute top-[472px] right-[-8px] z-50 w-[320px] max-w-[calc(100vw-2rem)] bg-black/95 backdrop-blur-sm rounded-[12px] px-4 py-3 shadow-2xl border border-gray-600/50 animate-fade-in"
                     >
                         <div className="text-white font-medium text-sm [font-family:'Poppins',Helvetica] leading-normal">
                             <div className="text-center text-gray-200">
-                                {isFirstTimeUser
-                                    ? "As a new user, you can undo as many times as needed."
-                                    : `You have ${maxUndoLimit === -1 ? 'unlimited' : maxUndoLimit - undoCount} undo attempts remaining.`
-                                }
+                                {isUnlimitedUndo
+                                    ? 'You have unlimited undos! Download a game to activate tier-based limits.'
+                                    : `You have ${Math.max(0, maxUndoLimit - undoCount)} undo attempt${maxUndoLimit - undoCount !== 1 ? 's' : ''} remaining.`}
                             </div>
-                            {!isFirstTimeUser && (
-                                <div className="text-center text-gray-400 text-xs mt-2">
-                                    {maxUndoLimit === 3 && "Returning User: 3 undos"}
-                                    {maxUndoLimit === -1 && "First-time User: Unlimited undos"}
-                                </div>
-                            )}
+                            <div className="text-center text-gray-400 text-xs mt-2">
+                                {isUnlimitedUndo
+                                    ? 'Unlimited swipes & undos'
+                                    : `${currentTier || 'Free'} plan: ${maxUndoLimit} undo${maxUndoLimit !== 1 ? 's' : ''}`}
+                            </div>
                         </div>
                         <div className="absolute top-[-8px] right-[25px] w-4 h-4 bg-black/95 border-t border-l border-gray-600/50 transform rotate-45"></div>
                     </div>
@@ -1003,7 +993,7 @@ const GameCard = ({ onClose: onCloseProp }) => {
                         <div className="bg-black rounded-lg p-6 max-w-sm mx-4 border border-gray-600">
                             <h3 className="text-lg font-bold text-white mb-4">Upgrade Your Plan</h3>
                             <p className="text-white mb-6 text-center">
-                                You've used all your undo attempts. Update your plan to unlock unlimited undos and more premium features!
+                                You've used all {maxUndoLimit} undo attempt{maxUndoLimit !== 1 ? 's' : ''} on your {currentTier || 'Free'} plan. Upgrade to get more undos: Bronze (6), Gold (8), Platinum (12).
                             </p>
                             <div className="flex gap-3">
                                 <button

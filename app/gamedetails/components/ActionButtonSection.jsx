@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 
-export const ActionButtonSection = ({ game, isInstalled, onGameAction }) => {
+export const ActionButtonSection = ({ game, isInstalled, onGameAction, isDisabled = false }) => {
     const [isPressed, setIsPressed] = useState(false);
 
     const handleButtonClick = async () => {
+        if (isDisabled) return;
+
         if (onGameAction) {
             await onGameAction();
         }
@@ -23,6 +25,8 @@ export const ActionButtonSection = ({ game, isInstalled, onGameAction }) => {
                     onMouseLeave={handleRelease}
                     aria-label="Start Playing - Redirects to App Store"
                     type="button"
+                    disabled={isDisabled}
+                    aria-disabled={isDisabled}
                 >
                     <span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 [font-family:'Poppins',Helvetica] font-semibold text-white text-base text-center tracking-[0] leading-[normal]">
                         {isInstalled ? 'Start Playing' : 'Download Now'}
